@@ -1,0 +1,5 @@
+(HTTrack|harvest|audit|dirbuster|pangolin|nmap|sqln|-scan|hydra|Parser|libwww|BBBike|sqlmap|w3af|owasp|Nikto|fimap|havij|PycURL|zmeu|BabyKrokodil|netsparker|httperf|bench|ApacheBench|Siege|wrk)
+(Acunetix|WebVulnScan|Paros|WebInspect|Burp|BurpSuite|WebScarab|dotDefender|AppScan|Arachni|Skipfish|Wapiti|WhatWeb|Wfuzz|DirBuster|GoBuster|ffuf|dirmap|feroxbuster|Naabu|Nuclei|httpx|subfinder|amass|masscan|ZGrab|ZMap|Shodan|Censys)
+(Awvs|Nessus|OpenVAS|Greenbone|Nexpose|Metasploit|Rapid7|Qualys|Tenable)
+(zgrab|nmap|masscan|nikto|dirb|gobuster|ffuf|dirmap|feroxbuster|wfuzz|skipfish|wapiti|whatweb|nuclei|httpx|naabu|subfinder|amass|shodan|censys)
+(Python-urllib|Python-requests|Go-http-client|scrapy|bot|crawl|spider|fetcher|checker|monitor|scraper)
