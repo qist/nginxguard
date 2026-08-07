@@ -1,33 +1,8 @@
 --waf core lib
 require 'config'
 
---Cache helper: read file content with mtime-based cache via ngx.shared.dict
---Avoids disk I/O on every request, only re-reads when file is modified
+--Cache via ngx.shared.dict, fallback to direct read if not configured
 local waf_cache = ngx.shared.waf_cache
-
-local function read_file_cached(filepath)
-    if waf_cache == nil then
-        -- fallback: no shared dict, read directly
-        local io = require 'io'
-        local f = io.open(filepath, "r")
-        if f == nil then return nil end
-        local content = f:read("*a")
-        f:close()
-        return content
-    end
-
-    local io = require 'io'
-    local f = io.open(filepath, "r")
-    if f == nil then
-        return nil
-    end
-    local mtime = f:seek("end")
-    f:seek("set")
-    local content = f:read("*a")
-    f:close()
-
-    return content
-end
 
 --Get the client IP
 function get_client_ip()
@@ -70,6 +45,31 @@ function get_domain()
     return string.lower(domain)
 end
 
+--Match domain in domain_config table (exact + wildcard)
+local function match_domain(domain_config, domain)
+    -- exact match
+    local specific = domain_config[domain]
+    if specific ~= nil then
+        return specific
+    end
+    -- wildcard match: *.example.com
+    for pattern, cfg in pairs(domain_config) do
+        if pattern ~= "_comment" and type(cfg) == "table" then
+            if string.find(pattern, "^%*%.") then
+                -- convert *.example.com -> ^.+\.example\.com$
+                local regex = string.gsub(pattern, "%%", "%%%%")
+                regex = string.gsub(regex, "%.", "%%.")
+                regex = string.gsub(regex, "^%*%%", "^.+")
+                regex = regex .. "$"
+                if ngx.re.find(domain, regex, "ijo") then
+                    return cfg
+                end
+            end
+        end
+    end
+    return nil
+end
+
 --Get domain-level config (cached in shared dict, reloads when domain.json changes)
 --Result is also cached per request via ngx.ctx
 function get_domain_config()
@@ -81,15 +81,9 @@ function get_domain_config()
     local RULE_PATH = config_rule_dir
     local DOMAIN_FILEPATH = RULE_PATH .. '/domain.json'
 
-    -- check cache in shared dict
-    local cached_mtime = nil
-    local cached_data = nil
-    if waf_cache then
-        cached_mtime = waf_cache:get("domain_json_mtime")
-        cached_data = waf_cache:get("domain_json_data")
-    end
-
     local io = require 'io'
+
+    -- get file mtime
     local current_mtime = nil
     local f = io.open(DOMAIN_FILEPATH, "r")
     if f ~= nil then
@@ -97,24 +91,28 @@ function get_domain_config()
         f:close()
     end
 
-    -- file not found
+    -- file not found → no domain config, use globals
     if current_mtime == nil then
         ngx.ctx._domain_config = nil
         return nil
     end
 
-    -- file unchanged and we have cached data
-    if cached_mtime == current_mtime and cached_data ~= nil then
-        -- cached_data is the parsed table serialized as JSON string
-        local cjson = require("cjson")
-        local ok, parsed = pcall(cjson.decode, cached_data)
-        if ok and type(parsed) == "table" then
-            ngx.ctx._domain_config = parsed
-            return parsed
+    -- check shared dict cache
+    if waf_cache then
+        local cached_mtime = waf_cache:get("domain_json_mtime")
+        local cached_data = waf_cache:get("domain_json_data")
+        if cached_mtime == current_mtime and cached_data ~= nil then
+            local cjson = require("cjson")
+            local ok, domain_config = pcall(cjson.decode, cached_data)
+            if ok and type(domain_config) == "table" then
+                local result = match_domain(domain_config, get_domain())
+                ngx.ctx._domain_config = result
+                return result
+            end
         end
     end
 
-    -- file changed or not cached: read and parse
+    -- read and parse file
     f = io.open(DOMAIN_FILEPATH, "r")
     if f == nil then
         ngx.ctx._domain_config = nil
@@ -136,8 +134,9 @@ function get_domain_config()
         waf_cache:set("domain_json_data", content)
     end
 
-    ngx.ctx._domain_config = domain_config
-    return domain_config
+    local result = match_domain(domain_config, get_domain())
+    ngx.ctx._domain_config = result
+    return result
 end
 
 --Get effective config value: domain-level first, fallback to global config_*
@@ -151,16 +150,9 @@ end
 
 --Read rule lines from a file, return table (cached in shared dict)
 local function read_rule_file(filepath)
-    -- check cache first
-    local cache_key = "rule:" .. filepath
-    local cached_mtime = nil
-    local cached_rules_json = nil
-    if waf_cache then
-        cached_mtime = waf_cache:get(cache_key .. "_mtime")
-        cached_rules_json = waf_cache:get(cache_key .. "_data")
-    end
-
     local io = require 'io'
+
+    -- get file mtime
     local f = io.open(filepath, "r")
     if f == nil then
         return nil
@@ -170,28 +162,34 @@ local function read_rule_file(filepath)
     local content = f:read("*a")
     f:close()
 
-    -- file unchanged and cached
-    if cached_mtime == current_mtime and cached_rules_json ~= nil then
-        local cjson = require("cjson")
-        local ok, rules = pcall(cjson.decode, cached_rules_json)
-        if ok and type(rules) == "table" then
-            return rules
+    -- check shared dict cache
+    if waf_cache then
+        local cache_key = "rule:" .. filepath
+        local cached_mtime = waf_cache:get(cache_key .. "_mtime")
+        local cached_data = waf_cache:get(cache_key .. "_data")
+        if cached_mtime == current_mtime and cached_data ~= nil then
+            local cjson = require("cjson")
+            local ok, rules = pcall(cjson.decode, cached_data)
+            if ok and type(rules) == "table" then
+                return rules
+            end
         end
+        -- update cache
+        local cjson = require("cjson")
+        local t = {}
+        for line in content:gmatch("[^\r\n]+") do
+            table.insert(t, line)
+        end
+        waf_cache:set(cache_key .. "_mtime", current_mtime)
+        waf_cache:set(cache_key .. "_data", cjson.encode(t))
+        return t
     end
 
-    -- parse file: one rule per line
+    -- no cache: parse directly
     local t = {}
     for line in content:gmatch("[^\r\n]+") do
         table.insert(t, line)
     end
-
-    -- update cache
-    if waf_cache then
-        local cjson = require("cjson")
-        waf_cache:set(cache_key .. "_mtime", current_mtime)
-        waf_cache:set(cache_key .. "_data", cjson.encode(t))
-    end
-
     return t
 end
 
