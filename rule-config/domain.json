@@ -1,0 +1,18 @@
+{
+    "_comment": "域名级规则配置文件。只配置需要覆盖全局(config.lua)的域名。未配置的域名走 config.lua 全局配置；域名中未指定的项也回退到全局。支持通配符域名如 *.example.com",
+
+    "www.example.com": {
+        "url_check": "off",
+        "cc_rate": "100/60",
+        "rule_dir": "domains/www.example.com"
+    },
+
+    "api.example.com": {
+        "waf_enable": "off"
+    },
+
+    "*.test.com": {
+        "post_check": "off",
+        "cookie_check": "off"
+    }
+}
