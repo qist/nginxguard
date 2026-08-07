@@ -237,15 +237,13 @@ function log_record(method,url,data,ruletag)
     local LOCAL_UTC = os.date("!*t",os.time());
     local LOCAL_TIME = os.time(LOCAL_UTC)
     local FORMAT_TIME = os.date("%Y-%m-%dT%H:%M:%SZ",LOCAL_TIME)
-    local SERVER_NAME = ngx.var.server_name
     local LOCAL_TIME = ngx.localtime()
     local DOMAIN = get_domain()
     local log_json_obj = {
                  ['@timestamp'] = FORMAT_TIME,
                  client_ip = CLIENT_IP,
                  local_time = LOCAL_TIME,
-                 server_name = SERVER_NAME,
-                 domain = DOMAIN,
+                 server_name = DOMAIN,
                  user_agent = USER_AGENT,
                  attack_method = method,
                  req_url = url,
