@@ -168,8 +168,13 @@ end
 function post_attack_check()
     if get_effective_config("post_check") == "on" then
         local POST_RULES = get_rule('post.rule')
+        -- read body first, required for HTTP/2/HTTP/3
+        ngx.req.read_body()
+        local ok, POST_ARGS = pcall(ngx.req.get_post_args)
+        if not ok or POST_ARGS == nil then
+            return false
+        end
         for _,rule in pairs(POST_RULES) do
-            local POST_ARGS = ngx.req.get_post_args()
             for key, val in pairs(POST_ARGS) do
                 if type(val) == 'table' then
                     POST_DATA = table.concat(val, " ")
