@@ -26,8 +26,6 @@ config_cc_check = "on"
 config_cc_rate = "60/60"
 --enable/disable post filtering
 config_post_check = "on"
---enable/disable whitelist mode (block all, only allow whiteurl.rule paths)
-config_whitelist_mode = "off"
 --config waf output redirect/html
 config_waf_output = "html"
 --if config_waf_output ,setting url
