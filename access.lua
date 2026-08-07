@@ -124,8 +124,11 @@ end
 function url_args_attack_check()
     if get_effective_config("url_args_check") == "on" then
         local ARGS_RULES = get_rule('args.rule')
+        local ok, REQ_ARGS = pcall(ngx.req.get_uri_args)
+        if not ok or REQ_ARGS == nil then
+            return false
+        end
         for _,rule in pairs(ARGS_RULES) do
-            local REQ_ARGS = ngx.req.get_uri_args()
             for key, val in pairs(REQ_ARGS) do
                 if type(val) == 'table' then
                     ARGS_DATA = table.concat(val, " ")
@@ -167,11 +170,19 @@ end
 --deny post
 function post_attack_check()
     if get_effective_config("post_check") == "on" then
+        -- skip non-POST/PUT requests (fix HTTP/2 GET 500 error)
+        local METHOD = ngx.req.get_method()
+        if METHOD ~= "POST" and METHOD ~= "PUT" and METHOD ~= "PATCH" then
+            return false
+        end
         local POST_RULES = get_rule('post.rule')
-        -- read body first, required for HTTP/2/HTTP/3
-        ngx.req.read_body()
-        local ok, POST_ARGS = pcall(ngx.req.get_post_args)
-        if not ok or POST_ARGS == nil then
+        -- read body first, pcall to prevent HTTP/2/HTTP/3 errors
+        local ok = pcall(ngx.req.read_body)
+        if not ok then
+            return false
+        end
+        local ok2, POST_ARGS = pcall(ngx.req.get_post_args)
+        if not ok2 or POST_ARGS == nil then
             return false
         end
         for _,rule in pairs(POST_RULES) do
@@ -214,4 +225,8 @@ function waf_main()
     end
 end
 
-waf_main()
+--run WAF, pcall to prevent 500 on any unexpected error (e.g. HTTP/2/HTTP/3)
+local ok, err = pcall(waf_main)
+if not ok then
+    ngx.log(ngx.ERR, "waf_main error: ", err)
+end
