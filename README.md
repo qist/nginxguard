@@ -52,11 +52,16 @@ waf/
     ├── useragent.rule      # 全局 User-Agent 规则
     ├── whiteip.rule        # 全局白名单 IP
     ├── whiteurl.rule       # 全局白名单 URL
-    └── domains/            # 域名专属规则目录
+    └── domains/                # 域名专属规则目录
         └── www.example.com/
-            ├── args.rule
-            ├── url.rule
-            └── whiteurl.rule
+            ├── args.rule          # URL参数攻击规则
+            ├── blackip.rule       # 黑名单IP（空文件=无黑名单）
+            ├── cookie.rule        # Cookie攻击规则
+            ├── post.rule          # POST攻击规则
+            ├── url.rule           # URL路径攻击规则
+            ├── useragent.rule     # User-Agent攻击规则
+            ├── whiteip.rule       # 白名单IP（空文件=无白名单）
+            └── whiteurl.rule      # URL白名单
 ```
 
 ---
@@ -125,17 +130,41 @@ waf/
 
 ### 域名专属规则目录
 
-在域名配置中设置 `rule_dir` 后，WAF 加载规则文件时会优先从该目录读取。如果该目录中某个规则文件不存在，则自动回退到全局 `rule-config/` 目录。
+在域名配置中设置 `rule_dir` 后，WAF 加载规则文件时会优先从该目录读取。所有 8 种规则文件都支持域名独立配置：
+
+| 规则文件 | 检测函数 | 说明 |
+|---------|---------|------|
+| `whiteip.rule` | `white_ip_check()` | IP 白名单 |
+| `blackip.rule` | `black_ip_check()` | IP 黑名单 |
+| `whiteurl.rule` | `white_url_check()` | URL 白名单 |
+| `url.rule` | `url_attack_check()` | URL 路径攻击检测 |
+| `args.rule` | `url_args_attack_check()` | URL 参数攻击检测 |
+| `useragent.rule` | `user_agent_attack_check()` | User-Agent 攻击检测 |
+| `cookie.rule` | `cookie_attack_check()` | Cookie 攻击检测 |
+| `post.rule` | `post_attack_check()` | POST 攻击检测 |
 
 `rule_dir` 支持两种写法：
 - **绝对路径**：以 `/` 开头，如 `/apps/nginx/conf/waf/rule-config/domains/www.example.com`
 - **相对路径**：不以 `/` 开头，相对于全局 `config_rule_dir` 解析，如 `domains/www.example.com` 实际解析为 `config_rule_dir/domains/www.example.com`
 
-例如 `www.example.com` 配置了 `rule_dir`，目录中包含 `url.rule` 和 `whiteurl.rule`，则：
-- `url.rule` → 使用域名专属规则
-- `whiteurl.rule` → 使用域名专属规则
-- `args.rule` → 域名目录中不存在，回退到全局 `rule-config/args.rule`
-- 其他规则文件同理回退
+#### 规则文件回退机制
+
+WAF 加载规则时，会先在域名 `rule_dir` 目录中查找，找不到再回退到全局 `rule-config/` 目录。**关键区别在于文件是否存在**：
+
+| 域名目录中 | 行为 | 说明 |
+|:---------:|------|------|
+| 文件不存在 | 回退全局 | 使用 `rule-config/` 下的同名规则文件 |
+| 空文件 | 不回退 | 返回空规则表，等同于该域名单项无规则 |
+| 有内容的文件 | 使用域名规则 | 只用域名目录中的规则，不合并全局 |
+
+例如 `www.example.com` 配置了 `rule_dir`，域名目录下有 `url.rule` 和 `whiteurl.rule`，但没放 `args.rule`：
+- `url.rule` → 有文件，使用域名专属规则
+- `whiteurl.rule` → 有文件，使用域名专属规则
+- `args.rule` → 文件不存在，回退到全局 `rule-config/args.rule`
+- `whiteip.rule` → 空文件，不回退，该域名无白名单 IP
+- `blackip.rule` → 空文件，不回退，该域名无黑名单 IP
+
+> **提示**：如果希望某项规则回退全局，不要在域名目录放该文件（包括空文件）。空文件等于明确指定
 
 ### 使用示例
 
