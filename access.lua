@@ -13,7 +13,7 @@ function white_ip_check()
         local WHITE_IP = get_client_ip()
         if IP_WHITE_RULE ~= nil then
             for _,rule in pairs(IP_WHITE_RULE) do
-                if rule ~= "" and rulematch(WHITE_IP,rule,"jo") then
+                if rule ~= "" and rulematch(WHITE_IP,glob_to_regex(rule),"jo") then
                     --log_record('White_IP',ngx.var.request_uri,"_","_")
                     return true
                 end
@@ -29,7 +29,7 @@ function black_ip_check()
         local BLACK_IP = get_client_ip()
         if IP_BLACK_RULE ~= nil then
             for _,rule in pairs(IP_BLACK_RULE) do
-                if rule ~= "" and rulematch(BLACK_IP,rule,"jo") then
+                if rule ~= "" and rulematch(BLACK_IP,glob_to_regex(rule),"jo") then
                     log_record('BlackList_IP',ngx.var_request_uri,"_","_")
                     if get_effective_config("waf_enable") == "on" then
                         ngx.exit(403)

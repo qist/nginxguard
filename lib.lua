@@ -4,6 +4,26 @@ require 'config'
 --Cache via ngx.shared.dict, fallback to direct read if not configured
 local waf_cache = ngx.shared.waf_cache
 
+--Convert glob-style wildcard pattern to regex
+--192.168.0.* → ^192\.168\.0\.\d+$
+--192.168.*.1  → ^192\.168\.\d+\.1$
+--If no * found, return as-is (already regex)
+function glob_to_regex(pattern)
+    if pattern == nil or pattern == "" then
+        return pattern
+    end
+    -- no wildcard, treat as regex
+    if not string.find(pattern, "%*") then
+        return pattern
+    end
+    -- escape special regex chars except *
+    local regex = string.gsub(pattern, "([%.%+%-%?%[%]%(%)%$%^])", "%%%1")
+    -- replace * with \d+
+    regex = string.gsub(regex, "%*", "\\d+")
+    -- anchor full match
+    return "^" .. regex .. "$"
+end
+
 --Get the client IP
 function get_client_ip()
     CLIENT_IP = ngx.req.get_headers()["X_real_ip"]
