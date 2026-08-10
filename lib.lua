@@ -16,8 +16,8 @@ function glob_to_regex(pattern)
     if not string.find(pattern, "%*") then
         return pattern
     end
-    -- escape special regex chars except *
-    local regex = string.gsub(pattern, "([%.%+%-%?%[%]%(%)%$%^])", "%%%1")
+    -- escape special regex chars except * (prepend backslash)
+    local regex = string.gsub(pattern, "([%.%+%-%?%[%]%(%)%$%^])", "\\%1")
     -- replace * with \d+
     regex = string.gsub(regex, "%*", "\\d+")
     -- anchor full match
