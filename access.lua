@@ -211,7 +211,7 @@ function user_agent_attack_check()
         local USER_AGENT = ngx.var.http_user_agent
         if USER_AGENT ~= nil and USER_AGENT_RULES ~= nil then
             for _,rule in pairs(USER_AGENT_RULES) do
-                if rule ~="" and rulematch(USER_AGENT,rule,"jo") then
+                if rule ~="" and rulematch(USER_AGENT,rule,"ijo") then
                     log_record('Deny_USER_AGENT',ngx.var.request_uri,"-",rule)
                     if get_effective_config("waf_enable") == "on" then
                         waf_output()
