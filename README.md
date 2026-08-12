@@ -111,6 +111,7 @@ waf/
 | 字段 | 说明 | 对应 config.lua 变量 |
 |------|------|---------------------|
 | `waf_enable` | WAF 总开关 | `config_waf_enable` |
+| `trust_proxy_headers` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=WAF 在 CDN/反代后，信任转发头；`"off"`=WAF 直接暴露，只用 `remote_addr` 防伪造 | `config_trust_proxy_headers` |
 | `white_url_check` | 白名单 URL 检测 | `config_white_url_check` |
 | `white_ip_check` | 白名单 IP 检测 | `config_white_ip_check` |
 | `black_ip_check` | 黑名单 IP 检测 | `config_black_ip_check` |
@@ -215,6 +216,25 @@ WAF 加载规则时，会先在域名 `rule_dir` 目录中查找，找不到再�
 }
 ```
 CC 超限后 IP 自动加入 `badGuys` 共享字典，600 秒内所有请求直接 403，600 秒后自动解封。设为 `0` 则关闭自动拉黑，只拦截当前请求。
+
+**场景 6：WAF 直接暴露公网，防止 IP 伪造**
+```lua
+-- config.lua
+config_trust_proxy_headers = "off"
+```
+当 WAF 不在 CDN/反向代理后面时，设置为 `"off"` 可防止攻击者伪造 `X-Forwarded-For` 头绕过 IP 黑白名单和 CC 限制。此时 WAF 只使用 TCP 连接的真实远端 IP（`remote_addr`）。支持域名级覆盖：
+
+```json
+{
+    "www.example.com": {
+        "trust_proxy_headers": "on"
+    },
+    "direct.example.com": {
+        "trust_proxy_headers": "off"
+    }
+}
+```
+上面的例子中，`www.example.com` 走 CDN 信任转发头，而 `direct.example.com` 直连暴露只认 `remote_addr`，互不影响。
 
 ### 不使用域名配置
 

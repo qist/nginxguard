@@ -237,7 +237,7 @@ function file_upload_check()
         local CONTENT_TYPE = ngx.var.content_type
         if CONTENT_TYPE == nil then return false end
         -- only check multipart form data (file uploads)
-        if not string.find(CONTENT_TYPE, "multipart/form%-data", 1, true) then
+        if not string.find(CONTENT_TYPE, "multipart/form%-data", 1) then
             return false
         end
         -- extract filenames from body
@@ -293,7 +293,7 @@ function post_attack_check()
                     else
                         POST_DATA = val
                     end
-                    if POST_DATA and type(POST_DATA) ~= "boolean" and rule ~= "" and rulematch(unescape(POST_DATA), rule, "jo") then
+                    if POST_DATA and type(POST_DATA) ~= "boolean" and rule ~= "" and rulematch(POST_DATA, rule, "jo") then
                         log_record('Deny_URL_POST', ngx.var.request_body, "-", rule)
                         if get_effective_config("waf_enable") == "on" then
                             waf_output()

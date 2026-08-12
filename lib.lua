@@ -4,6 +4,84 @@ require 'config'
 --Cache via ngx.shared.dict, fallback to direct read if not configured
 local waf_cache = ngx.shared.waf_cache
 
+--File modification time detection
+--Uses LuaJIT FFI (built into OpenResty) to call libc stat() — no extra module needed
+--Fallback: file size + TTL if FFI unavailable
+local get_file_mtime
+local mtime_reliable = false
+
+do
+    local ok_ffi, ffi = pcall(require, "ffi")
+    if ok_ffi then
+        -- Define a minimal struct to read st_mtime on Linux 64-bit (x86_64 & aarch64)
+        -- st_mtime is at byte offset 88 in struct stat; total struct is 144 bytes
+        pcall(ffi.cdef, [[
+            struct waf_stat_t {
+                long long _pad_to_mtime[11];
+                long long st_mtime;
+                long long _rest[7];
+            };
+            int stat(const char *path, struct waf_stat_t *buf);
+            int __xstat(int ver, const char *path, struct waf_stat_t *buf);
+        ]])
+
+        local buf = ffi.new("struct waf_stat_t")
+        local do_stat
+
+        -- Try stat() (modern glibc 2.33+ or musl libc)
+        pcall(function()
+            if ffi.C.stat("/dev/null", buf) == 0 then
+                do_stat = function(path)
+                    local b = ffi.new("struct waf_stat_t")
+                    if ffi.C.stat(path, b) == 0 then
+                        return tonumber(b.st_mtime)
+                    end
+                    return nil
+                end
+            end
+        end)
+
+        -- Try __xstat (older glibc: _STAT_VER_LINUX = 1 on x86_64, 0 on aarch64)
+        if not do_stat then
+            pcall(function()
+                for _, ver in ipairs({1, 0, 3}) do
+                    if ffi.C.__xstat(ver, "/dev/null", buf) == 0 then
+                        do_stat = function(path)
+                            local b = ffi.new("struct waf_stat_t")
+                            if ffi.C.__xstat(ver, path, b) == 0 then
+                                return tonumber(b.st_mtime)
+                            end
+                            return nil
+                        end
+                        break
+                    end
+                end
+            end)
+        end
+
+        if do_stat then
+            get_file_mtime = do_stat
+            mtime_reliable = true
+        end
+    end
+end
+
+-- Fallback: file size (less reliable, combined with TTL as safety net)
+if not get_file_mtime then
+    get_file_mtime = function(filepath)
+        local io = require 'io'
+        local f = io.open(filepath, "r")
+        if f == nil then return nil end
+        local size = f:seek("end")
+        f:close()
+        return size
+    end
+end
+
+--Cache TTL: 0 when mtime is reliable (FFI stat available);
+--60s when using file-size fallback (forces periodic re-read)
+local cache_ttl = mtime_reliable and 0 or 60
+
 --Convert glob-style wildcard pattern to regex
 --192.168.0.* → ^192\.168\.0\.\d+$
 --192.168.*.1  → ^192\.168\.\d+\.1$
@@ -24,27 +102,33 @@ function glob_to_regex(pattern)
     return "^" .. regex .. "$"
 end
 
---Get the client IP (extract first IP from X-Forwarded-For, support CF-Connecting-IP)
+--Get the client IP
+--When trust_proxy_headers="on": extract from X-Forwarded-For/X-Real-IP/CF-Connecting-IP
+--When trust_proxy_headers="off": only use remote_addr (prevent IP spoofing)
+--Supports per-domain override via domain.json
 function get_client_ip()
     if ngx.ctx._client_ip then
         return ngx.ctx._client_ip
     end
-    local headers = ngx.req.get_headers()
-    -- 1. CF-Connecting-IP (Cloudflare specific, most reliable)
-    local ip = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
-    -- 2. X-Real-IP
-    if ip == nil then
-        ip = headers["X_real_ip"] or headers["X-Real-IP"]
-    end
-    -- 3. X-Forwarded-For (take first IP if multiple)
-    if ip == nil then
-        local xff = headers["X_Forwarded_For"] or headers["X-Forwarded-For"]
-        if xff then
-            -- extract first IP: "103.119.132.48, 162.158.179.193" → "103.119.132.48"
-            ip = string.match(xff, "^%s*([%d%.:%a]+)")
+    local ip
+    if get_effective_config("trust_proxy_headers") ~= "off" then
+        local headers = ngx.req.get_headers()
+        -- 1. CF-Connecting-IP (Cloudflare specific, most reliable)
+        ip = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
+        -- 2. X-Real-IP
+        if ip == nil then
+            ip = headers["X_real_ip"] or headers["X-Real-IP"]
+        end
+        -- 3. X-Forwarded-For (take first IP if multiple)
+        if ip == nil then
+            local xff = headers["X_Forwarded_For"] or headers["X-Forwarded-For"]
+            if xff then
+                -- extract first IP: "103.119.132.48, 162.158.179.193" → "103.119.132.48"
+                ip = string.match(xff, "^%s*([%d%.:%a]+)")
+            end
         end
     end
-    -- 4. remote_addr
+    -- 4. remote_addr (always available, or fallback when headers not trusted)
     if ip == nil then
         ip = ngx.var.remote_addr
     end
@@ -98,10 +182,9 @@ local function match_domain(domain_config, domain)
     for pattern, cfg in pairs(domain_config) do
         if pattern ~= "_comment" and type(cfg) == "table" then
             if string.find(pattern, "^%*%.") then
-                -- convert *.example.com -> ^.+\.example\.com$
-                local regex = string.gsub(pattern, "%%", "%%%%")
-                regex = string.gsub(regex, "%.", "%%.")
-                regex = string.gsub(regex, "^%*%%", "^.+")
+                -- convert *.example.com -> ^.+\.example\.com$ (PCRE regex)
+                local regex = string.gsub(pattern, "%.", "\\.")
+                regex = string.gsub(regex, "^%*\\%.", "^.+\\.")
                 regex = regex .. "$"
                 if ngx.re.find(domain, regex, "ijo") then
                     return cfg
@@ -123,15 +206,8 @@ function get_domain_config()
     local RULE_PATH = config_rule_dir
     local DOMAIN_FILEPATH = RULE_PATH .. '/domain.json'
 
-    local io = require 'io'
-
-    -- get file mtime
-    local current_mtime = nil
-    local f = io.open(DOMAIN_FILEPATH, "r")
-    if f ~= nil then
-        current_mtime = f:seek("end")
-        f:close()
-    end
+    -- get file mtime (real mtime via lfs, or file size as fallback)
+    local current_mtime = get_file_mtime(DOMAIN_FILEPATH)
 
     -- file not found → no domain config, use globals
     if current_mtime == nil then
@@ -155,7 +231,8 @@ function get_domain_config()
     end
 
     -- read and parse file
-    f = io.open(DOMAIN_FILEPATH, "r")
+    local io = require 'io'
+    local f = io.open(DOMAIN_FILEPATH, "r")
     if f == nil then
         ngx.ctx._domain_config = nil
         return nil
@@ -170,10 +247,10 @@ function get_domain_config()
         return nil
     end
 
-    -- update cache
+    -- update cache (with TTL for file-size fallback mode)
     if waf_cache then
-        waf_cache:set("domain_json_mtime", current_mtime)
-        waf_cache:set("domain_json_data", content)
+        waf_cache:set("domain_json_mtime", current_mtime, cache_ttl)
+        waf_cache:set("domain_json_data", content, cache_ttl)
     end
 
     local result = match_domain(domain_config, get_domain())
@@ -192,17 +269,11 @@ end
 
 --Read rule lines from a file, return table (cached in shared dict)
 local function read_rule_file(filepath)
-    local io = require 'io'
-
-    -- get file mtime
-    local f = io.open(filepath, "r")
-    if f == nil then
+    -- get file mtime (real mtime via lfs, or file size as fallback)
+    local current_mtime = get_file_mtime(filepath)
+    if current_mtime == nil then
         return nil
     end
-    local current_mtime = f:seek("end")
-    f:seek("set")
-    local content = f:read("*a")
-    f:close()
 
     -- check shared dict cache
     if waf_cache then
@@ -216,18 +287,36 @@ local function read_rule_file(filepath)
                 return rules
             end
         end
-        -- update cache
+
+        -- cache miss: read and parse file
+        local io = require 'io'
+        local f = io.open(filepath, "r")
+        if f == nil then
+            return nil
+        end
+        local content = f:read("*a")
+        f:close()
+
         local cjson = require("cjson")
         local t = {}
         for line in content:gmatch("[^\r\n]+") do
             table.insert(t, line)
         end
-        waf_cache:set(cache_key .. "_mtime", current_mtime)
-        waf_cache:set(cache_key .. "_data", cjson.encode(t))
+        -- update cache (with TTL for file-size fallback mode)
+        waf_cache:set(cache_key .. "_mtime", current_mtime, cache_ttl)
+        waf_cache:set(cache_key .. "_data", cjson.encode(t), cache_ttl)
         return t
     end
 
     -- no cache: parse directly
+    local io = require 'io'
+    local f = io.open(filepath, "r")
+    if f == nil then
+        return nil
+    end
+    local content = f:read("*a")
+    f:close()
+
     local t = {}
     for line in content:gmatch("[^\r\n]+") do
         table.insert(t, line)
@@ -298,12 +387,11 @@ end
 
 function log_record(method,url,data,ruletag)
     local cjson = require("cjson")
+    local io = require 'io'
     local LOG_PATH = config_log_dir
     local CLIENT_IP = get_client_ip()
     local USER_AGENT = get_user_agent()
-    local LOCAL_UTC = os.date("!*t",os.time());
-    local LOCAL_TIME = os.time(LOCAL_UTC)
-    local FORMAT_TIME = os.date("%Y-%m-%dT%H:%M:%SZ",LOCAL_TIME)
+    local FORMAT_TIME = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time())
     local LOCAL_TIME = ngx.localtime()
     local DOMAIN = get_domain()
     local log_json_obj = {

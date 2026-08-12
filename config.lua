@@ -2,6 +2,10 @@
 
 --waf status
 config_waf_enable = "on"
+--trust proxy forwarded headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)
+--"on"  = WAF behind CDN/reverse proxy, trust forwarded headers to get real client IP
+--"off" = WAF directly exposed to internet, only use remote_addr to prevent IP spoofing
+config_trust_proxy_headers = "on"
 --log dir
 config_log_dir = "/apps/nginx/log/"
 --rule setting
