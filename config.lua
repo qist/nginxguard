@@ -14,6 +14,8 @@ config_rule_dir = "/apps/nginx/conf/waf/rule-config"
 config_white_url_check = "on"
 --enable/disable white ip
 config_white_ip_check = "on"
+--enable/disable white ua (search engine bots bypass all WAF checks)
+config_white_ua_check = "on"
 --enable/disable block ip
 config_black_ip_check = "on"
 --enable/disable url filtering

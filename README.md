@@ -52,6 +52,7 @@ waf/
     ├── useragent.rule      # 全局 User-Agent 规则
     ├── whiteip.rule        # 全局白名单 IP
     ├── whiteurl.rule       # 全局白名单 URL
+    ├── whiteua.rule        # 全局白名单 UA（搜索引擎爬虫）
     ├── referer.rule        # 全局 Referer 规则
     ├── fileext.rule        # 全局文件上传扩展名规则
     └── domains/                # 域名专属规则目录
@@ -113,6 +114,7 @@ waf/
 | `waf_enable` | WAF 总开关 | `config_waf_enable` |
 | `trust_proxy_headers` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=WAF 在 CDN/反代后，信任转发头；`"off"`=WAF 直接暴露，只用 `remote_addr` 防伪造 | `config_trust_proxy_headers` |
 | `white_url_check` | 白名单 URL 检测 | `config_white_url_check` |
+| `white_ua_check` | 白名单 UA 检测（搜索引擎爬虫放行，跳过所有 WAF 检查） | `config_white_ua_check` |
 | `white_ip_check` | 白名单 IP 检测 | `config_white_ip_check` |
 | `black_ip_check` | 黑名单 IP 检测 | `config_black_ip_check` |
 | `url_check` | URL 攻击检测 | `config_url_check` |
@@ -144,6 +146,7 @@ waf/
 | `whiteip.rule` | `white_ip_check()` | IP 白名单 |
 | `blackip.rule` | `black_ip_check()` | IP 黑名单 |
 | `whiteurl.rule` | `white_url_check()` | URL 白名单 |
+| `whiteua.rule` | `white_ua_check()` | UA 白名单（搜索引擎爬虫放行） |
 | `url.rule` | `url_attack_check()` | URL 路径攻击检测 |
 | `args.rule` | `url_args_attack_check()` | URL 参数攻击检测 |
 | `useragent.rule` | `user_agent_attack_check()` | User-Agent 攻击检测 |
