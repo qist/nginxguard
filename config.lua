@@ -28,6 +28,10 @@ config_cc_rate = "60/60"
 config_cc_block_ttl = 600
 --enable/disable post filtering
 config_post_check = "on"
+--enable/disable referer filtering
+config_referer_check = "off"
+--enable/disable file upload extension filtering
+config_file_upload_check = "on"
 --config waf output redirect/html
 config_waf_output = "html"
 --if config_waf_output ,setting url

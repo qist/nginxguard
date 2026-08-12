@@ -76,36 +76,45 @@ function white_url_check()
     end
 end
 
---deny cc attack
+--deny cc attack (sliding window via incr + expire)
 function cc_attack_check()
     if get_effective_config("cc_check") == "on" then
-        local ATTACK_URI=ngx.var.uri
-        local CC_TOKEN = get_client_ip()..ATTACK_URI
+        local ATTACK_URI = ngx.var.uri
+        local CC_TOKEN = get_client_ip() .. ATTACK_URI
         local limit = ngx.shared.limit
+        if limit == nil then return false end
         local cc_rate = get_effective_config("cc_rate")
-        local CCcount=tonumber(string.match(cc_rate,'(.*)/'))
-        local CCseconds=tonumber(string.match(cc_rate,'/(.*)'))
-        local req,_ = limit:get(CC_TOKEN)
-        if req then
-            if req > CCcount then
-                log_record('CC_Attack',ngx.var.request_uri,"-","-")
-                -- auto-ban IP with TTL
-                local block_ttl = tonumber(get_effective_config("cc_block_ttl"))
-                if block_ttl and block_ttl > 0 then
-                    local badGuys = ngx.shared.badGuys
-                    if badGuys and not badGuys:get(get_client_ip()) then
-                        badGuys:set(get_client_ip(), 1, block_ttl)
-                        log_record('CC_AutoBan',ngx.var.request_uri,"_","ban_"..block_ttl.."s")
-                    end
+        local CCcount = tonumber(string.match(cc_rate, '(.*)/'))
+        local CCseconds = tonumber(string.match(cc_rate, '/(.*)'))
+        if CCcount == nil or CCseconds == nil then return false end
+
+        -- incr with init: first request creates counter=1 with TTL, subsequent increments
+        local count, err = limit:incr(CC_TOKEN, 1, 0, CCseconds)
+        if count == nil then
+            -- incr failed, try set as fallback
+            count = 1
+            limit:set(CC_TOKEN, 1, CCseconds)
+        end
+
+        if count > CCcount then
+            log_record('CC_Attack', ngx.var.request_uri, "-", "-")
+            -- auto-ban IP with TTL
+            local block_ttl = tonumber(get_effective_config("cc_block_ttl"))
+            if block_ttl and block_ttl > 0 then
+                local badGuys = ngx.shared.badGuys
+                if badGuys and not badGuys:get(get_client_ip()) then
+                    badGuys:set(get_client_ip(), 1, block_ttl)
+                    log_record('CC_AutoBan', ngx.var.request_uri, "_", "ban_" .. block_ttl .. "s")
                 end
-                if get_effective_config("waf_enable") == "on" then
-                    ngx.exit(403)
-                end
-            else
-                limit:incr(CC_TOKEN,1)
             end
+            if get_effective_config("waf_enable") == "on" then
+                ngx.exit(403)
+            end
+            return true
         else
-            limit:set(CC_TOKEN,1,CCseconds)
+            -- refresh TTL on each request for sliding window effect
+            -- expire() requires OpenResty 0.10.12+, pcall for older versions
+            pcall(function() limit:expire(CC_TOKEN, CCseconds) end)
         end
     end
     return false
@@ -154,16 +163,18 @@ end
 function url_args_attack_check()
     if get_effective_config("url_args_check") == "on" then
         local ARGS_RULES = get_rule('args.rule')
+        if ARGS_RULES == nil then return false end
         local ok, REQ_ARGS = pcall(ngx.req.get_uri_args)
-        if not ok or REQ_ARGS == nil or ARGS_RULES == nil then
+        if not ok or REQ_ARGS == nil then
             return false
         end
         for _,rule in pairs(ARGS_RULES) do
             for key, val in pairs(REQ_ARGS) do
+                local ARGS_DATA
                 if type(val) == 'table' then
-                local ARGS_DATA = table.concat(val, " ")
+                    ARGS_DATA = table.concat(val, " ")
                 else
-                    local ARGS_DATA = val
+                    ARGS_DATA = val
                 end
                 if ARGS_DATA and type(ARGS_DATA) ~= "boolean" and rule ~= "" and rulematch(unescape(ARGS_DATA),rule,"jo") then
                     log_record('Deny_URL_Args',ngx.var.request_uri,"-",rule)
@@ -198,7 +209,63 @@ function user_agent_attack_check()
     return false
 end
 
---deny post
+--deny referer
+function referer_check()
+    if get_effective_config("referer_check") == "on" then
+        local REFERER_RULES = get_rule('referer.rule')
+        local REFERER = ngx.var.http_referer
+        if REFERER ~= nil and REFERER_RULES ~= nil then
+            for _,rule in pairs(REFERER_RULES) do
+                if rule ~= "" and rulematch(REFERER, rule, "jo") then
+                    log_record('Deny_Referer', ngx.var.request_uri, "-", rule)
+                    if get_effective_config("waf_enable") == "on" then
+                        waf_output()
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+--deny file upload by extension
+function file_upload_check()
+    if get_effective_config("file_upload_check") == "on" then
+        local UPLOAD_RULES = get_rule('fileext.rule')
+        if UPLOAD_RULES == nil then return false end
+        local CONTENT_TYPE = ngx.var.content_type
+        if CONTENT_TYPE == nil then return false end
+        -- only check multipart form data (file uploads)
+        if not string.find(CONTENT_TYPE, "multipart/form%-data", 1, true) then
+            return false
+        end
+        -- extract filenames from body
+        local ok = pcall(ngx.req.read_body)
+        if not ok then return false end
+        local body = ngx.req.get_body_data()
+        if body == nil then
+            local file = ngx.req.get_body_file()
+            if file then
+                local f = io.open(file, "r")
+                if f then body = f:read("*a") f:close() end
+            end
+        end
+        if body == nil then return false end
+        for _,rule in pairs(UPLOAD_RULES) do
+            if rule ~= "" and rulematch(body, rule, "jo") then
+                log_record('Deny_File_Upload', ngx.var.request_uri, "-", rule)
+                if get_effective_config("waf_enable") == "on" then
+                    waf_output()
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+--deny post (form + JSON body)
 function post_attack_check()
     if get_effective_config("post_check") == "on" then
         -- skip non-POST/PUT requests (fix HTTP/2 GET 500 error)
@@ -208,24 +275,49 @@ function post_attack_check()
         end
         local POST_RULES = get_rule('post.rule')
         if POST_RULES == nil then return false end
+
         -- read body first, pcall to prevent HTTP/2/HTTP/3 errors
         local ok = pcall(ngx.req.read_body)
         if not ok then
             return false
         end
+
+        -- 1. Try form-encoded args
         local ok2, POST_ARGS = pcall(ngx.req.get_post_args)
-        if not ok2 or POST_ARGS == nil then
-            return false
-        end
-        for _,rule in pairs(POST_RULES) do
-            for key, val in pairs(POST_ARGS) do
-                if type(val) == 'table' then
-                    local POST_DATA = table.concat(val, " ")
-                else
-                    local POST_DATA = val
+        if ok2 and POST_ARGS ~= nil then
+            for _,rule in pairs(POST_RULES) do
+                for key, val in pairs(POST_ARGS) do
+                    local POST_DATA
+                    if type(val) == 'table' then
+                        POST_DATA = table.concat(val, " ")
+                    else
+                        POST_DATA = val
+                    end
+                    if POST_DATA and type(POST_DATA) ~= "boolean" and rule ~= "" and rulematch(unescape(POST_DATA), rule, "jo") then
+                        log_record('Deny_URL_POST', ngx.var.request_body, "-", rule)
+                        if get_effective_config("waf_enable") == "on" then
+                            waf_output()
+                            return true
+                        end
+                    end
                 end
-                if POST_DATA and type(POST_DATA) ~= "boolean" and rule ~="" and rulematch(unescape(POST_DATA),rule,"jo") then
-                    log_record('Deny_URL_POST',ngx.var.request_body,"-",rule)
+            end
+        end
+
+        -- 2. Try raw body (JSON, XML, etc.)
+        local body = ngx.req.get_body_data()
+        if body == nil then
+            -- body too large, stored in temp file
+            local file = ngx.req.get_body_file()
+            if file then
+                local f = io.open(file, "r")
+                if f then body = f:read("*a") f:close() end
+            end
+        end
+        if body and #body > 0 then
+            for _,rule in pairs(POST_RULES) do
+                if rule ~= "" and rulematch(unescape(body), rule, "jo") then
+                    log_record('Deny_URL_POST', ngx.var.request_uri, "-", rule)
                     if get_effective_config("waf_enable") == "on" then
                         waf_output()
                         return true
@@ -248,8 +340,10 @@ function waf_main()
     elseif dynamic_black_ip_check() then
     elseif black_ip_check() then
     elseif user_agent_attack_check() then
+    elseif referer_check() then
     elseif cc_attack_check() then
     elseif cookie_attack_check() then
+    elseif file_upload_check() then
     elseif url_attack_check() then
     elseif url_args_attack_check() then
     elseif post_attack_check() then

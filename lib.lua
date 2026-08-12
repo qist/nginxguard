@@ -268,9 +268,36 @@ function get_rule(rulefilename)
 end
 
 --WAF log record for json,(use logstash codec => json)
+--Uses ngx.timer.at for async file write to avoid blocking worker
+--Falls back to sync write if timer API unavailable
+local function async_write_log(log_name, log_line)
+    -- try async via timer
+    local ok = pcall(function()
+        ngx.timer.at(0, function(premature)
+            if premature then return end
+            local io = require 'io'
+            local file = io.open(log_name, "a")
+            if file then
+                file:write(log_line .. "\n")
+                file:flush()
+                file:close()
+            end
+        end)
+    end)
+    if not ok then
+        -- fallback: sync write
+        local io = require 'io'
+        local file = io.open(log_name, "a")
+        if file then
+            file:write(log_line .. "\n")
+            file:flush()
+            file:close()
+        end
+    end
+end
+
 function log_record(method,url,data,ruletag)
     local cjson = require("cjson")
-    local io = require 'io'
     local LOG_PATH = config_log_dir
     local CLIENT_IP = get_client_ip()
     local USER_AGENT = get_user_agent()
@@ -292,13 +319,20 @@ function log_record(method,url,data,ruletag)
               }
     local LOG_LINE = cjson.encode(log_json_obj)
     local LOG_NAME = LOG_PATH..'/'..ngx.today().."_waf.log"
-    local file = io.open(LOG_NAME,"a")
-    if file == nil then
-        return
+
+    -- log rotation: if file > 100MB, rename to .old
+    local file_size = 0
+    local f_check = io.open(LOG_NAME, "r")
+    if f_check then
+        file_size = f_check:seek("end")
+        f_check:close()
     end
-    file:write(LOG_LINE.."\n")
-    file:flush()
-    file:close()
+    if file_size > 104857600 then  -- 100MB
+        local os_cmd = require("os")
+        os_cmd.rename(LOG_NAME, LOG_NAME .. ".old")
+    end
+
+    async_write_log(LOG_NAME, LOG_LINE)
 end
 
 --WAF return (supports per-domain output config)

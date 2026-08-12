@@ -52,6 +52,8 @@ waf/
     ├── useragent.rule      # 全局 User-Agent 规则
     ├── whiteip.rule        # 全局白名单 IP
     ├── whiteurl.rule       # 全局白名单 URL
+    ├── referer.rule        # 全局 Referer 规则
+    ├── fileext.rule        # 全局文件上传扩展名规则
     └── domains/                # 域名专属规则目录
         └── www.example.com/
             ├── args.rule          # URL参数攻击规则
@@ -119,7 +121,9 @@ waf/
 | `cc_check` | CC 攻击检测 | `config_cc_check` |
 | `cc_rate` | CC 限速（次数/秒数） | `config_cc_rate` |
 | `cc_block_ttl` | CC 触发后自动拉黑 IP 的时长（秒），0=不自动拉黑，默认 600（10分钟） | `config_cc_block_ttl` |
-| `post_check` | POST 检测 | `config_post_check` |
+| `post_check` | POST 检测（表单 + JSON body） | `config_post_check` |
+| `referer_check` | Referer 检测 | `config_referer_check` |
+| `file_upload_check` | 文件上传扩展名检测 | `config_file_upload_check` |
 | `waf_output` | 拦截输出方式 | `config_waf_output` |
 | `waf_redirect_url` | 跳转 URL | `config_waf_redirect_url` |
 | `rule_dir` | 域名专属规则目录路径，支持绝对路径或相对路径 | （无全局对应，默认走 `config_rule_dir`） |
@@ -143,7 +147,9 @@ waf/
 | `args.rule` | `url_args_attack_check()` | URL 参数攻击检测 |
 | `useragent.rule` | `user_agent_attack_check()` | User-Agent 攻击检测 |
 | `cookie.rule` | `cookie_attack_check()` | Cookie 攻击检测 |
-| `post.rule` | `post_attack_check()` | POST 攻击检测 |
+| `post.rule` | `post_attack_check()` | POST 攻击检测（表单 + JSON body） |
+| `referer.rule` | `referer_check()` | Referer 检测 |
+| `fileext.rule` | `file_upload_check()` | 文件上传扩展名检测 |
 
 `rule_dir` 支持两种写法：
 - **绝对路径**：以 `/` 开头，如 `/apps/nginx/conf/waf/rule-config/domains/www.example.com`
@@ -229,3 +235,5 @@ WAF 日志中新增了 `domain` 字段，记录触发规则的请求域名，便
 | `Deny_URL_POST` | POST 攻击拦截 |
 | `Deny_USER_AGENT` | User-Agent 攻击拦截 |
 | `Deny_Cookie` | Cookie 攻击拦截 |
+| `Deny_Referer` | Referer 拦截 |
+| `Deny_File_Upload` | 文件上传拦截 |
