@@ -248,7 +248,86 @@ function referer_check()
     return false
 end
 
+-- Extract filenames from multipart Content-Disposition headers
+-- Only reads header portions, NOT file content (prevents OOM on large uploads)
+-- Handles: filename="xxx", filename=xxx, filename*=UTF-8''xxx (RFC 5987)
+-- For temp files: reads in 64KB chunks with 512-byte overlap, max 2MB scan
+local function extract_filenames_from_multipart()
+    local filenames = {}
+    local body = ngx.req.get_body_data()
+
+    if body then
+        -- Body in memory (≤ client_body_buffer_size): extract filenames
+        for m in ngx.re.gmatch(body, [[filename="([^"]*)"]], "ijo") do
+            if m[1] and m[1] ~= "" then
+                table.insert(filenames, m[1])
+            end
+        end
+        for m in ngx.re.gmatch(body, [[filename=([^";\r\n]+)]], "ijo") do
+            if m[1] and m[1] ~= "" then
+                table.insert(filenames, m[1])
+            end
+        end
+        -- RFC 5987: filename*=UTF-8''percent-encoded
+        for m in ngx.re.gmatch(body, [[filename\*=UTF-8''([^;\r\n]+)]], "ijo") do
+            if m[1] and m[1] ~= "" then
+                table.insert(filenames, unescape(m[1]))
+            end
+        end
+        return filenames
+    end
+
+    -- Body in temp file: read in chunks, extract filenames only (never load full file)
+    local file = ngx.req.get_body_file()
+    if not file then return filenames end
+
+    local f = io.open(file, "rb")
+    if not f then return filenames end
+
+    local chunk_size = 65536    -- 64KB per chunk
+    local max_scan = 2097152    -- scan max 2MB (covers multi-file uploads)
+    local total = 0
+    local prev_tail = ""
+
+    while total < max_scan do
+        local chunk = f:read(chunk_size)
+        if not chunk then break end
+        total = total + #chunk
+
+        -- prepend previous tail for cross-chunk pattern matching
+        local data = prev_tail .. chunk
+
+        for m in ngx.re.gmatch(data, [[filename="([^"]*)"]], "ijo") do
+            if m[1] and m[1] ~= "" then
+                table.insert(filenames, m[1])
+            end
+        end
+        for m in ngx.re.gmatch(data, [[filename=([^";\r\n]+)]], "ijo") do
+            if m[1] and m[1] ~= "" then
+                table.insert(filenames, m[1])
+            end
+        end
+        for m in ngx.re.gmatch(data, [[filename\*=UTF-8''([^;\r\n]+)]], "ijo") do
+            if m[1] and m[1] ~= "" then
+                table.insert(filenames, unescape(m[1]))
+            end
+        end
+
+        -- keep last 512 bytes as overlap for next chunk
+        if #data > 512 then
+            prev_tail = string.sub(data, -512)
+        else
+            prev_tail = data
+        end
+    end
+    f:close()
+
+    return filenames
+end
+
 --deny file upload by extension
+--Only checks filenames from multipart Content-Disposition headers
+--Does NOT read file content into memory
 function file_upload_check()
     if get_effective_config("file_upload_check") == "on" then
         local UPLOAD_RULES = get_rule('fileext.rule')
@@ -259,24 +338,23 @@ function file_upload_check()
         if not string.find(CONTENT_TYPE, "multipart/form%-data", 1) then
             return false
         end
-        -- extract filenames from body
+        -- read body (needed for both in-memory and temp file access)
         local ok = pcall(ngx.req.read_body)
         if not ok then return false end
-        local body = ngx.req.get_body_data()
-        if body == nil then
-            local file = ngx.req.get_body_file()
-            if file then
-                local f = io.open(file, "r")
-                if f then body = f:read("*a") f:close() end
-            end
-        end
-        if body == nil then return false end
-        for _,rule in pairs(UPLOAD_RULES) do
-            if rule ~= "" and rulematch(body, rule, "jo") then
-                log_record('Deny_File_Upload', ngx.var.request_uri, "-", rule)
-                if get_effective_config("waf_enable") == "on" then
-                    waf_output()
-                    return true
+
+        -- extract filenames from multipart headers (NOT file content)
+        local filenames = extract_filenames_from_multipart()
+        if filenames == nil or #filenames == 0 then return false end
+
+        -- match each filename against rules individually
+        for _, fname in ipairs(filenames) do
+            for _, rule in pairs(UPLOAD_RULES) do
+                if rule ~= "" and rulematch(fname, rule, "jo") then
+                    log_record('Deny_File_Upload', ngx.var.request_uri, "-", rule)
+                    if get_effective_config("waf_enable") == "on" then
+                        waf_output()
+                        return true
+                    end
                 end
             end
         end
