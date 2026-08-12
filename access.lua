@@ -76,8 +76,8 @@ function white_url_check()
     end
 end
 
---allow white ua (search engine bots bypass all WAF checks)
-function white_ua_check()
+--check if UA is whitelisted (search engine bots skip UA blacklist only)
+local function is_white_ua()
     if get_effective_config("white_ua_check") == "on" then
         local UA_WHITE_RULES = get_rule('whiteua.rule')
         local USER_AGENT = ngx.var.http_user_agent
@@ -89,6 +89,7 @@ function white_ua_check()
             end
         end
     end
+    return false
 end
 
 --deny cc attack (sliding window via incr + expire)
@@ -204,9 +205,12 @@ function url_args_attack_check()
     return false
 end
 
---deny user agent
+--deny user agent (skip if UA is whitelisted, e.g. Googlebot)
 function user_agent_attack_check()
     if get_effective_config("user_agent_check") == "on" then
+        if is_white_ua() then
+            return false
+        end
         local USER_AGENT_RULES = get_rule('useragent.rule')
         local USER_AGENT = ngx.var.http_user_agent
         if USER_AGENT ~= nil and USER_AGENT_RULES ~= nil then
@@ -352,7 +356,6 @@ function waf_main()
     end
     if white_ip_check() then
     elseif white_url_check() then
-    elseif white_ua_check() then
     elseif dynamic_black_ip_check() then
     elseif black_ip_check() then
     elseif user_agent_attack_check() then
