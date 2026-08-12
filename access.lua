@@ -83,8 +83,8 @@ function cc_attack_check()
         local CC_TOKEN = get_client_ip()..ATTACK_URI
         local limit = ngx.shared.limit
         local cc_rate = get_effective_config("cc_rate")
-        CCcount=tonumber(string.match(cc_rate,'(.*)/'))
-        CCseconds=tonumber(string.match(cc_rate,'/(.*)'))
+        local CCcount=tonumber(string.match(cc_rate,'(.*)/'))
+        local CCseconds=tonumber(string.match(cc_rate,'/(.*)'))
         local req,_ = limit:get(CC_TOKEN)
         if req then
             if req > CCcount then
@@ -116,7 +116,7 @@ function cookie_attack_check()
     if get_effective_config("cookie_check") == "on" then
         local COOKIE_RULES = get_rule('cookie.rule')
         local USER_COOKIE = ngx.var.http_cookie
-        if USER_COOKIE ~= nil then
+        if USER_COOKIE ~= nil and COOKIE_RULES ~= nil then
             for _,rule in pairs(COOKIE_RULES) do
                 if rule ~="" and rulematch(USER_COOKIE,rule,"jo") then
                     log_record('Deny_Cookie',ngx.var.request_uri,"-",rule)
@@ -136,6 +136,7 @@ function url_attack_check()
     if get_effective_config("url_check") == "on" then
         local URL_RULES = get_rule('url.rule')
         local REQ_URI = ngx.var.request_uri
+        if URL_RULES == nil then return false end
         for _,rule in pairs(URL_RULES) do
             if rule ~="" and rulematch(REQ_URI,rule,"jo") then
                 log_record('Deny_URL',REQ_URI,"-",rule)
@@ -154,17 +155,17 @@ function url_args_attack_check()
     if get_effective_config("url_args_check") == "on" then
         local ARGS_RULES = get_rule('args.rule')
         local ok, REQ_ARGS = pcall(ngx.req.get_uri_args)
-        if not ok or REQ_ARGS == nil then
+        if not ok or REQ_ARGS == nil or ARGS_RULES == nil then
             return false
         end
         for _,rule in pairs(ARGS_RULES) do
             for key, val in pairs(REQ_ARGS) do
                 if type(val) == 'table' then
-                    ARGS_DATA = table.concat(val, " ")
+                local ARGS_DATA = table.concat(val, " ")
                 else
-                    ARGS_DATA = val
+                    local ARGS_DATA = val
                 end
-                if ARGS_DATA and type(ARGS_DATA) ~= "boolean" and rule ~="" and rulematch(unescape(ARGS_DATA),rule,"jo") then
+                if ARGS_DATA and type(ARGS_DATA) ~= "boolean" and rule ~= "" and rulematch(unescape(ARGS_DATA),rule,"jo") then
                     log_record('Deny_URL_Args',ngx.var.request_uri,"-",rule)
                     if get_effective_config("waf_enable") == "on" then
                         waf_output()
@@ -182,7 +183,7 @@ function user_agent_attack_check()
     if get_effective_config("user_agent_check") == "on" then
         local USER_AGENT_RULES = get_rule('useragent.rule')
         local USER_AGENT = ngx.var.http_user_agent
-        if USER_AGENT ~= nil then
+        if USER_AGENT ~= nil and USER_AGENT_RULES ~= nil then
             for _,rule in pairs(USER_AGENT_RULES) do
                 if rule ~="" and rulematch(USER_AGENT,rule,"jo") then
                     log_record('Deny_USER_AGENT',ngx.var.request_uri,"-",rule)
@@ -206,6 +207,7 @@ function post_attack_check()
             return false
         end
         local POST_RULES = get_rule('post.rule')
+        if POST_RULES == nil then return false end
         -- read body first, pcall to prevent HTTP/2/HTTP/3 errors
         local ok = pcall(ngx.req.read_body)
         if not ok then
@@ -218,9 +220,9 @@ function post_attack_check()
         for _,rule in pairs(POST_RULES) do
             for key, val in pairs(POST_ARGS) do
                 if type(val) == 'table' then
-                    POST_DATA = table.concat(val, " ")
+                    local POST_DATA = table.concat(val, " ")
                 else
-                    POST_DATA = val
+                    local POST_DATA = val
                 end
                 if POST_DATA and type(POST_DATA) ~= "boolean" and rule ~="" and rulematch(unescape(POST_DATA),rule,"jo") then
                     log_record('Deny_URL_POST',ngx.var.request_body,"-",rule)

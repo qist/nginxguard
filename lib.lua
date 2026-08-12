@@ -26,29 +26,33 @@ end
 
 --Get the client IP (extract first IP from X-Forwarded-For, support CF-Connecting-IP)
 function get_client_ip()
+    if ngx.ctx._client_ip then
+        return ngx.ctx._client_ip
+    end
     local headers = ngx.req.get_headers()
     -- 1. CF-Connecting-IP (Cloudflare specific, most reliable)
-    CLIENT_IP = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
+    local ip = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
     -- 2. X-Real-IP
-    if CLIENT_IP == nil then
-        CLIENT_IP = headers["X_real_ip"] or headers["X-Real-IP"]
+    if ip == nil then
+        ip = headers["X_real_ip"] or headers["X-Real-IP"]
     end
     -- 3. X-Forwarded-For (take first IP if multiple)
-    if CLIENT_IP == nil then
+    if ip == nil then
         local xff = headers["X_Forwarded_For"] or headers["X-Forwarded-For"]
         if xff then
             -- extract first IP: "103.119.132.48, 162.158.179.193" → "103.119.132.48"
-            CLIENT_IP = string.match(xff, "^%s*([%d%.:%a]+)")
+            ip = string.match(xff, "^%s*([%d%.:%a]+)")
         end
     end
     -- 4. remote_addr
-    if CLIENT_IP == nil then
-        CLIENT_IP = ngx.var.remote_addr
+    if ip == nil then
+        ip = ngx.var.remote_addr
     end
-    if CLIENT_IP == nil then
-        CLIENT_IP = "unknown"
+    if ip == nil then
+        ip = "unknown"
     end
-    return CLIENT_IP
+    ngx.ctx._client_ip = ip
+    return ip
 end
 
 --Get the client user agent
@@ -62,11 +66,15 @@ end
 
 --Get the request domain (strip port from host)
 function get_domain()
+    if ngx.ctx._domain then
+        return ngx.ctx._domain
+    end
     local host = ngx.var.http_host
     if host == nil then
         host = ngx.var.server_name
     end
     if host == nil then
+        ngx.ctx._domain = "default"
         return "default"
     end
     -- strip port: www.example.com:8080 -> www.example.com
@@ -74,7 +82,9 @@ function get_domain()
     if domain == nil then
         domain = host
     end
-    return string.lower(domain)
+    domain = string.lower(domain)
+    ngx.ctx._domain = domain
+    return domain
 end
 
 --Match domain in domain_config table (exact + wildcard)
