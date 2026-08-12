@@ -24,17 +24,29 @@ function glob_to_regex(pattern)
     return "^" .. regex .. "$"
 end
 
---Get the client IP
+--Get the client IP (extract first IP from X-Forwarded-For, support CF-Connecting-IP)
 function get_client_ip()
-    CLIENT_IP = ngx.req.get_headers()["X_real_ip"]
+    local headers = ngx.req.get_headers()
+    -- 1. CF-Connecting-IP (Cloudflare specific, most reliable)
+    CLIENT_IP = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
+    -- 2. X-Real-IP
     if CLIENT_IP == nil then
-        CLIENT_IP = ngx.req.get_headers()["X_Forwarded_For"]
+        CLIENT_IP = headers["X_real_ip"] or headers["X-Real-IP"]
+    end
+    -- 3. X-Forwarded-For (take first IP if multiple)
+    if CLIENT_IP == nil then
+        local xff = headers["X_Forwarded_For"] or headers["X-Forwarded-For"]
+        if xff then
+            -- extract first IP: "103.119.132.48, 162.158.179.193" → "103.119.132.48"
+            CLIENT_IP = string.match(xff, "^%s*([%d%.:%a]+)")
+        end
+    end
+    -- 4. remote_addr
+    if CLIENT_IP == nil then
+        CLIENT_IP = ngx.var.remote_addr
     end
     if CLIENT_IP == nil then
-        CLIENT_IP  = ngx.var.remote_addr
-    end
-    if CLIENT_IP == nil then
-        CLIENT_IP  = "unknown"
+        CLIENT_IP = "unknown"
     end
     return CLIENT_IP
 end
