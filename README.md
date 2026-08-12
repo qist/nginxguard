@@ -64,7 +64,10 @@ waf/
             ├── url.rule           # URL路径攻击规则
             ├── useragent.rule     # User-Agent攻击规则
             ├── whiteip.rule       # 白名单IP（空文件=无白名单）
-            └── whiteurl.rule      # URL白名单
+            ├── whiteurl.rule      # URL白名单
+            ├── whiteua.rule       # UA白名单（搜索引擎爬虫放行）
+            ├── referer.rule       # Referer攻击规则
+            └── fileext.rule       # 文件上传扩展名规则
 ```
 
 ---
@@ -114,7 +117,7 @@ waf/
 | `waf_enable` | WAF 总开关 | `config_waf_enable` |
 | `trust_proxy_headers` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=WAF 在 CDN/反代后，信任转发头；`"off"`=WAF 直接暴露，只用 `remote_addr` 防伪造 | `config_trust_proxy_headers` |
 | `white_url_check` | 白名单 URL 检测 | `config_white_url_check` |
-| `white_ua_check` | 白名单 UA 检测（搜索引擎爬虫放行，跳过所有 WAF 检查） | `config_white_ua_check` |
+| `white_ua_check` | 白名单 UA 检测（搜索引擎爬虫放行，仅跳过 UA 黑名单检测，不影响 URL/POST/CC 等其他检测） | `config_white_ua_check` |
 | `white_ip_check` | 白名单 IP 检测 | `config_white_ip_check` |
 | `black_ip_check` | 黑名单 IP 检测 | `config_black_ip_check` |
 | `url_check` | URL 攻击检测 | `config_url_check` |
@@ -139,14 +142,14 @@ waf/
 
 ### 域名专属规则目录
 
-在域名配置中设置 `rule_dir` 后，WAF 加载规则文件时会优先从该目录读取。所有 8 种规则文件都支持域名独立配置：
+在域名配置中设置 `rule_dir` 后，WAF 加载规则文件时会优先从该目录读取。所有规则文件都支持域名独立配置：
 
 | 规则文件 | 检测函数 | 说明 |
 |---------|---------|------|
 | `whiteip.rule` | `white_ip_check()` | IP 白名单 |
 | `blackip.rule` | `black_ip_check()` | IP 黑名单 |
 | `whiteurl.rule` | `white_url_check()` | URL 白名单 |
-| `whiteua.rule` | `white_ua_check()` | UA 白名单（搜索引擎爬虫放行） |
+| `whiteua.rule` | `user_agent_attack_check()` 内部调用 `is_white_ua()` | UA 白名单（搜索引擎爬虫放行，仅跳过 UA 黑名单检测） |
 | `url.rule` | `url_attack_check()` | URL 路径攻击检测 |
 | `args.rule` | `url_args_attack_check()` | URL 参数攻击检测 |
 | `useragent.rule` | `user_agent_attack_check()` | User-Agent 攻击检测 |
@@ -242,6 +245,36 @@ config_trust_proxy_headers = "off"
 ### 不使用域名配置
 
 如果 `rule-config/domain.json` 文件不存在或格式错误，WAF 会自动回退到 `config.lua` 中的全局配置，行为与旧版完全一致。
+
+---
+
+## 规则缓存与热加载
+
+### 缓存机制
+
+WAF 使用 `ngx.shared.dict` 缓存规则文件和域名配置，避免每次请求都读磁盘。缓存失效策略基于**文件修改时间（mtime）**：
+
+- **LuaJIT FFI `stat()`**（首选）：通过 FFI 直接调用 libc 的 `stat()` 系统函数获取文件 mtime，**无需编译任何 C 模块**，纯 Lua 实现。支持现代 glibc（`stat()`）和旧版 glibc（`__xstat()`），兼容 x86_64 和 aarch64。
+- **文件大小回退**（降级）：当 FFI 不可用时，回退为使用文件大小 + 60 秒 TTL 作为缓存失效判断。可靠性略低于 mtime，但功能正常。
+
+修改规则文件后**无需 reload nginx**，下次请求自动检测到 mtime 变化并重新加载规则。
+
+### 白名单 UA 安全说明
+
+`whiteua.rule` 中的搜索引擎爬虫（Googlebot、Baiduspider 等）**仅跳过 UA 黑名单检测**（`useragent.rule`），不会跳过其他任何安全检测：
+
+| 检测项 | 白名单 UA 是否跳过 |
+|--------|:----------------:|
+| User-Agent 黑名单 (`useragent.rule`) | ✅ 跳过 |
+| URL 攻击检测 (`url.rule`) | ❌ 仍检测 |
+| URL 参数检测 (`args.rule`) | ❌ 仍检测 |
+| POST 攻击检测 (`post.rule`) | ❌ 仍检测 |
+| CC 攻击检测 | ❌ 仍检测 |
+| Cookie 检测 (`cookie.rule`) | ❌ 仍检测 |
+| 文件上传检测 (`fileext.rule`) | ❌ 仍检测 |
+| IP 黑白名单 | ❌ 仍检测 |
+
+这样设计可以防止攻击者伪造搜索引擎 UA 来绕过 WAF 的其他安全检测。
 
 ### 日志
 
