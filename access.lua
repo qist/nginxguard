@@ -21,7 +21,7 @@ function white_ip_check()
     end
 end
 
---deny black ip
+--deny black ip (static blacklist from blackip.rule)
 function black_ip_check()
      if get_effective_config("black_ip_check") == "on" then
         local IP_BLACK_RULE = get_rule('blackip.rule')
@@ -29,7 +29,7 @@ function black_ip_check()
         if IP_BLACK_RULE ~= nil then
             for _,rule in pairs(IP_BLACK_RULE) do
                 if rule ~= "" and rulematch(BLACK_IP,glob_to_regex(rule),"jo") then
-                    log_record('BlackList_IP',ngx.var_request_uri,"_","_")
+                    log_record('BlackList_IP',ngx.var.request_uri,"_","_")
                     if get_effective_config("waf_enable") == "on" then
                         ngx.exit(403)
                         return true
@@ -38,6 +38,27 @@ function black_ip_check()
             end
         end
     end
+end
+
+--deny dynamic black ip (auto-banned by CC, with TTL auto-expire)
+function dynamic_black_ip_check()
+    local block_ttl = tonumber(get_effective_config("cc_block_ttl"))
+    if block_ttl == nil or block_ttl <= 0 then
+        return false
+    end
+    local badGuys = ngx.shared.badGuys
+    if badGuys == nil then
+        return false
+    end
+    local CLIENT_IP = get_client_ip()
+    if badGuys:get(CLIENT_IP) then
+        log_record('Dynamic_Block_IP',ngx.var.request_uri,"_","_")
+        if get_effective_config("waf_enable") == "on" then
+            ngx.exit(403)
+            return true
+        end
+    end
+    return false
 end
 
 --allow white url
@@ -68,6 +89,15 @@ function cc_attack_check()
         if req then
             if req > CCcount then
                 log_record('CC_Attack',ngx.var.request_uri,"-","-")
+                -- auto-ban IP with TTL
+                local block_ttl = tonumber(get_effective_config("cc_block_ttl"))
+                if block_ttl and block_ttl > 0 then
+                    local badGuys = ngx.shared.badGuys
+                    if badGuys and not badGuys:get(get_client_ip()) then
+                        badGuys:set(get_client_ip(), 1, block_ttl)
+                        log_record('CC_AutoBan',ngx.var.request_uri,"_","ban_"..block_ttl.."s")
+                    end
+                end
                 if get_effective_config("waf_enable") == "on" then
                     ngx.exit(403)
                 end
@@ -146,6 +176,7 @@ function url_args_attack_check()
     end
     return false
 end
+
 --deny user agent
 function user_agent_attack_check()
     if get_effective_config("user_agent_check") == "on" then
@@ -212,6 +243,7 @@ function waf_main()
     end
     if white_ip_check() then
     elseif white_url_check() then
+    elseif dynamic_black_ip_check() then
     elseif black_ip_check() then
     elseif user_agent_attack_check() then
     elseif cc_attack_check() then

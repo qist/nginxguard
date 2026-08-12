@@ -24,6 +24,8 @@ config_cookie_check = "on"
 config_cc_check = "on"
 --cc rate the xxx of xxx seconds
 config_cc_rate = "60/60"
+--cc block ttl (seconds), auto-ban IP when CC triggered, 0=disable auto-ban
+config_cc_block_ttl = 600
 --enable/disable post filtering
 config_post_check = "on"
 --config waf output redirect/html
