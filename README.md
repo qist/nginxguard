@@ -89,6 +89,7 @@ waf/
     "www.example.com": {
         "url_check": "off",
         "cc_rate": "100/60",
+        "cc_block_ttl": 300,
         "rule_dir": "domains/www.example.com"
     },
 
@@ -117,6 +118,7 @@ waf/
 | `cookie_check` | Cookie 检测 | `config_cookie_check` |
 | `cc_check` | CC 攻击检测 | `config_cc_check` |
 | `cc_rate` | CC 限速（次数/秒数） | `config_cc_rate` |
+| `cc_block_ttl` | CC 触发后自动拉黑 IP 的时长（秒），0=不自动拉黑，默认 600（10分钟） | `config_cc_block_ttl` |
 | `post_check` | POST 检测 | `config_post_check` |
 | `waf_output` | 拦截输出方式 | `config_waf_output` |
 | `waf_redirect_url` | 跳转 URL | `config_waf_redirect_url` |
@@ -199,6 +201,15 @@ WAF 加载规则时，会先在域名 `rule_dir` 目录中查找，找不到再�
 }
 ```
 
+**场景 5：CC 触发后自动拉黑 IP，10 分钟后自动解封**
+```json
+"www.example.com": {
+    "cc_rate": "60/60",
+    "cc_block_ttl": 600
+}
+```
+CC 超限后 IP 自动加入 `badGuys` 共享字典，600 秒内所有请求直接 403，600 秒后自动解封。设为 `0` 则关闭自动拉黑，只拦截当前请求。
+
 ### 不使用域名配置
 
 如果 `rule-config/domain.json` 文件不存在或格式错误，WAF 会自动回退到 `config.lua` 中的全局配置，行为与旧版完全一致。
@@ -206,3 +217,15 @@ WAF 加载规则时，会先在域名 `rule_dir` 目录中查找，找不到再�
 ### 日志
 
 WAF 日志中新增了 `domain` 字段，记录触发规则的请求域名，便于按域名分析攻击日志。
+
+| attack_method | 说明 |
+|---------------|------|
+| `BlackList_IP` | 静态黑名单 IP 拦截（blackip.rule） |
+| `Dynamic_Block_IP` | 动态黑名单拦截（CC 自动拉黑，封禁期内） |
+| `CC_Attack` | CC 限速触发 |
+| `CC_AutoBan` | CC 触发后 IP 被自动拉黑，记录封禁时长 |
+| `Deny_URL` | URL 攻击拦截 |
+| `Deny_URL_Args` | URL 参数攻击拦截 |
+| `Deny_URL_POST` | POST 攻击拦截 |
+| `Deny_USER_AGENT` | User-Agent 攻击拦截 |
+| `Deny_Cookie` | Cookie 攻击拦截 |
