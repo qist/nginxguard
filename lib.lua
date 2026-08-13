@@ -1,8 +1,13 @@
 --waf core lib
 require 'config'
 
+--Module-level requires (avoid per-request lookup)
+local cjson = require("cjson")
+local io = require 'io'
+
 --Cache via ngx.shared.dict, fallback to direct read if not configured
 local waf_cache = ngx.shared.waf_cache
+local rulematch = ngx.re.find
 
 --File modification time detection
 --Uses LuaJIT FFI (built into OpenResty) to call libc stat() — no extra module needed
@@ -141,7 +146,7 @@ end
 
 --Get the client user agent
 function get_user_agent()
-    USER_AGENT = ngx.var.http_user_agent
+    local USER_AGENT = ngx.var.http_user_agent
     if USER_AGENT == nil then
        USER_AGENT = "unknown"
     end
@@ -171,11 +176,16 @@ function get_domain()
     return domain
 end
 
+--Rule cache TTL: re-check file mtime at most every N seconds (not per-request)
+--This eliminates ~10 stat() syscalls per request → ~0 (amortized)
+local RULE_CACHE_TTL = 10  -- seconds between mtime re-checks
+
 --Worker-level domain config cache (avoids per-request cjson.decode)
 --Stores parsed Lua table + precompiled wildcard regexes
 local worker_domain_config = nil      -- parsed domain.json table
 local worker_wildcard_patterns = nil  -- precompiled: { {suffix=".example.com", cfg=...}, ... }
 local worker_domain_mtime = nil       -- mtime of last loaded domain.json
+local worker_domain_last_check = 0    -- last time we stat()'d domain.json (ngx.time)
 
 --Match domain: O(1) exact lookup, then precompiled wildcard suffix match
 local function match_domain(domain)
@@ -205,7 +215,6 @@ end
 --Load and parse domain.json into worker memory (called when mtime changes)
 --Precompiles wildcard patterns: *.example.com → suffix=".example.com"
 local function load_domain_config(filepath, mtime)
-    local io = require 'io'
     local f = io.open(filepath, "r")
     if f == nil then
         worker_domain_config = nil
@@ -216,7 +225,6 @@ local function load_domain_config(filepath, mtime)
     local content = f:read("*a")
     f:close()
 
-    local cjson = require("cjson")
     local ok, domain_config = pcall(cjson.decode, content)
     if not ok or type(domain_config) ~= "table" then
         worker_domain_config = nil
@@ -252,18 +260,28 @@ function get_domain_config()
     end
     ngx.ctx._domain_config_loaded = true
 
-    local DOMAIN_FILEPATH = config_rule_dir .. '/domain.json'
-    local current_mtime = get_file_mtime(DOMAIN_FILEPATH)
+    -- TTL-based mtime check: only stat() once every RULE_CACHE_TTL seconds
+    local now = ngx.time()
+    if now - worker_domain_last_check >= RULE_CACHE_TTL then
+        worker_domain_last_check = now
+        local DOMAIN_FILEPATH = config_rule_dir .. '/domain.json'
+        local current_mtime = get_file_mtime(DOMAIN_FILEPATH)
 
-    -- file not found → no domain config, use globals
-    if current_mtime == nil then
-        ngx.ctx._domain_config = nil
-        return nil
-    end
+        if current_mtime == nil then
+            -- file removed: clear cache
+            if worker_domain_config ~= nil then
+                worker_domain_config = nil
+                worker_wildcard_patterns = nil
+                worker_domain_mtime = nil
+            end
+            ngx.ctx._domain_config = nil
+            return nil
+        end
 
-    -- check if worker cache is current (mtime comparison, no decode)
-    if worker_domain_mtime ~= current_mtime then
-        load_domain_config(DOMAIN_FILEPATH, current_mtime)
+        -- reload only if mtime changed
+        if worker_domain_mtime ~= current_mtime then
+            load_domain_config(DOMAIN_FILEPATH, current_mtime)
+        end
     end
 
     -- match domain from worker-level Lua table (O(1) exact + suffix match)
@@ -281,26 +299,34 @@ function get_effective_config(key)
     return _G["config_" .. key]
 end
 
---Worker-level rule cache (avoids per-request cjson.decode)
---key: filepath → { mtime=, rules=Lua table }
+--Worker-level rule cache (avoids per-request cjson.decode AND per-request stat())
+--key: filepath → { mtime=, rules=Lua table, last_check=timestamp }
 local worker_rule_cache = {}
 
---Read rule lines from a file (cached in worker memory, no per-request cjson.decode)
+--Read rule lines from a file (cached in worker memory with TTL-based invalidation)
 local function read_rule_file(filepath)
+    local entry = worker_rule_cache[filepath]
+    local now = ngx.time()
+
+    -- Fast path: cache hit and within TTL window → return immediately (NO stat())
+    if entry and (now - entry.last_check) < RULE_CACHE_TTL then
+        return entry.rules
+    end
+
+    -- TTL expired: re-stat to check if file changed
     local current_mtime = get_file_mtime(filepath)
     if current_mtime == nil then
         worker_rule_cache[filepath] = nil
         return nil
     end
 
-    -- check worker-level cache (mtime comparison only, no decode)
-    local entry = worker_rule_cache[filepath]
+    -- mtime unchanged → just update last_check, return cached rules
     if entry and entry.mtime == current_mtime then
+        entry.last_check = now
         return entry.rules
     end
 
-    -- cache miss: read and parse file
-    local io = require 'io'
+    -- cache miss or file changed: read and parse file
     local f = io.open(filepath, "r")
     if f == nil then
         worker_rule_cache[filepath] = nil
@@ -313,11 +339,38 @@ local function read_rule_file(filepath)
     for line in content:gmatch("[^\r\n]+") do
         table.insert(t, line)
     end
-    worker_rule_cache[filepath] = { mtime = current_mtime, rules = t }
+
+    -- Build combined alternation pattern for fast matching
+    -- (?:rule1|rule2|rule3|...) — 1 regex match instead of N
+    local parts = {}
+    for _, r in ipairs(t) do
+        if r ~= "" then
+            table.insert(parts, r)
+        end
+    end
+    local combined = nil
+    if #parts > 0 then
+        combined = "(?:" .. table.concat(parts, "|") .. ")"
+    end
+
+    -- Pre-compile glob patterns (for IP rules like 192.168.*)
+    -- Store compiled regexes so we don't call glob_to_regex per request
+    local glob_compiled = {}
+    for _, r in ipairs(t) do
+        if r ~= "" and string.find(r, "%*") then
+            table.insert(glob_compiled, glob_to_regex(r))
+        end
+    end
+
+    worker_rule_cache[filepath] = {
+        mtime = current_mtime, rules = t, combined = combined,
+        glob_compiled = glob_compiled, last_check = now
+    }
     return t
 end
 
 --Resolve rule_dir: absolute path used as-is; relative path resolved against config_rule_dir
+--Must be defined BEFORE get_rule_entry (Lua local scope requirement)
 local function resolve_rule_dir(dir)
     if dir == nil or dir == "" then
         return nil
@@ -330,23 +383,86 @@ local function resolve_rule_dir(dir)
     return config_rule_dir .. '/' .. dir
 end
 
---Get WAF rule (supports per-domain rule_dir override, with caching)
-function get_rule(rulefilename)
+--Get full rule entry (rules array + combined pattern) for a rule file
+--Supports per-domain rule_dir override, with TTL caching
+function get_rule_entry(rulefilename)
     local RULE_PATH = config_rule_dir
-
-    -- check domain-level rule_dir
     local dcfg = get_domain_config()
     if dcfg and dcfg["rule_dir"] and dcfg["rule_dir"] ~= "" then
         local resolved = resolve_rule_dir(dcfg["rule_dir"])
-        local domain_rules = read_rule_file(resolved .. '/' .. rulefilename)
-        if domain_rules ~= nil then
-            return domain_rules
+        if resolved then
+            local domain_filepath = resolved .. '/' .. rulefilename
+            local domain_entry = worker_rule_cache[domain_filepath]
+            if domain_entry and (ngx.time() - domain_entry.last_check) < RULE_CACHE_TTL then
+                return domain_entry
+            end
+            -- try to read from domain-specific rule dir
+            local domain_rules = read_rule_file(domain_filepath)
+            if domain_rules ~= nil then
+                return worker_rule_cache[domain_filepath]
+            end
+            -- domain rule file doesn't exist → fall through to global rules
         end
     end
+    local filepath = RULE_PATH .. '/' .. rulefilename
+    local entry = worker_rule_cache[filepath]
+    local now = ngx.time()
+    if entry and (now - entry.last_check) < RULE_CACHE_TTL then
+        return entry
+    end
+    read_rule_file(filepath)
+    return worker_rule_cache[filepath]
+end
 
-    -- fallback to global rule dir
-    local rules = read_rule_file(RULE_PATH .. '/' .. rulefilename)
-    return rules
+--Match IP against a rule file (uses pre-compiled glob patterns)
+--Returns true if IP matches any rule, nil otherwise
+function match_ip_rule(rulefilename, ip)
+    local entry = get_rule_entry(rulefilename)
+    if entry == nil then return nil end
+    -- Check pre-compiled glob patterns (wildcard IPs like 192.168.*)
+    if entry.glob_compiled then
+        for _, gregex in ipairs(entry.glob_compiled) do
+            if rulematch(ip, gregex, "jo") then
+                return true
+            end
+        end
+    end
+    -- Check non-glob rules (exact IPs like 8.8.8.8, or regex)
+    for _, rule in ipairs(entry.rules) do
+        if rule ~= "" and not string.find(rule, "%*") then
+            if rulematch(ip, rule, "jo") then
+                return true
+            end
+        end
+    end
+    return nil
+end
+
+--Get WAF rule (returns rules array only, for backward compat)
+function get_rule(rulefilename)
+    local entry = get_rule_entry(rulefilename)
+    if entry == nil then return nil end
+    return entry.rules
+end
+
+--Fast match: check if input matches ANY rule in a rule file
+--Returns the matched rule string (for logging), or nil if no match
+--Uses combined alternation pattern for O(1) regex match on normal traffic
+function match_any_rule(rulefilename, input, flags)
+    local entry = get_rule_entry(rulefilename)
+    if entry == nil then return nil end
+    -- Fast path: single combined regex match (covers 99%+ of normal traffic)
+    if entry.combined == nil then return nil end
+    if not rulematch(input, entry.combined, flags) then
+        return nil
+    end
+    -- Slow path (attack detected): find which specific rule matched for logging
+    for _, rule in ipairs(entry.rules) do
+        if rule ~= "" and rulematch(input, rule, flags) then
+            return rule
+        end
+    end
+    return ""  -- combined matched but individual didn't (edge case)
 end
 
 --WAF log: batch buffer per worker (avoids per-attack open/write/close)
@@ -367,7 +483,6 @@ local function flush_log_buffer(log_name)
     local ok = pcall(function()
         ngx.timer.at(0, function(premature)
             if premature then return end
-            local io = require 'io'
             local file = io.open(log_name, "a")
             if file then
                 file:write(lines)
@@ -377,7 +492,6 @@ local function flush_log_buffer(log_name)
         end)
     end)
     if not ok then
-        local io = require 'io'
         local file = io.open(log_name, "a")
         if file then
             file:write(lines)
@@ -388,7 +502,6 @@ local function flush_log_buffer(log_name)
 end
 
 function log_record(method,url,data,ruletag)
-    local cjson = require("cjson")
     local LOG_PATH = config_log_dir
     local CLIENT_IP = get_client_ip()
     local USER_AGENT = get_user_agent()
@@ -413,14 +526,12 @@ function log_record(method,url,data,ruletag)
     local now = ngx.time()
     if now - log_last_flush_time > 60 then
         log_last_flush_time = now
-        local io = require 'io'
         local f_check = io.open(LOG_NAME, "r")
         if f_check then
             local file_size = f_check:seek("end")
             f_check:close()
             if file_size > 104857600 then  -- 100MB
-                local os_cmd = require("os")
-                os_cmd.rename(LOG_NAME, LOG_NAME .. ".old")
+                os.rename(LOG_NAME, LOG_NAME .. ".old")
             end
         end
     end
