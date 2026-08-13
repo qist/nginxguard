@@ -92,7 +92,7 @@ local function is_white_ua()
     return false
 end
 
---deny cc attack (sliding window via incr + expire)
+--deny cc attack (sliding window via incr + TTL)
 function cc_attack_check()
     if get_effective_config("cc_check") == "on" then
         local ATTACK_URI = ngx.var.uri
@@ -100,14 +100,14 @@ function cc_attack_check()
         local limit = ngx.shared.limit
         if limit == nil then return false end
         local cc_rate = get_effective_config("cc_rate")
-        local CCcount = tonumber(string.match(cc_rate, '(.*)/'))
-        local CCseconds = tonumber(string.match(cc_rate, '/(.*)'))
+        -- parse cc_rate "60/60" → CCcount=60, CCseconds=60
+        local CCcount = tonumber(string.match(cc_rate, '^(%d+)/'))
+        local CCseconds = tonumber(string.match(cc_rate, '/(%d+)$'))
         if CCcount == nil or CCseconds == nil then return false end
 
-        -- incr with init: first request creates counter=1 with TTL, subsequent increments
+        -- incr with init+TTL: first request creates counter=1 with TTL, subsequent increments
         local count, err = limit:incr(CC_TOKEN, 1, 0, CCseconds)
         if count == nil then
-            -- incr failed, try set as fallback
             count = 1
             limit:set(CC_TOKEN, 1, CCseconds)
         end
@@ -127,11 +127,8 @@ function cc_attack_check()
                 ngx.exit(403)
             end
             return true
-        else
-            -- refresh TTL on each request for sliding window effect
-            -- expire() requires OpenResty 0.10.12+, pcall for older versions
-            pcall(function() limit:expire(CC_TOKEN, CCseconds) end)
         end
+        -- TTL is set by incr() init, no need for separate expire() call
     end
     return false
 end
@@ -402,18 +399,58 @@ function post_attack_check()
         end
 
         -- 2. Try raw body (JSON, XML, etc.)
+        -- Read body in chunks to avoid OOM on large uploads (max 2MB scan)
         local body = ngx.req.get_body_data()
         if body == nil then
-            -- body too large, stored in temp file
+            -- body too large, stored in temp file: read in chunks
             local file = ngx.req.get_body_file()
             if file then
-                local f = io.open(file, "r")
-                if f then body = f:read("*a") f:close() end
+                local f = io.open(file, "rb")
+                if f then
+                    local chunk_size = 65536    -- 64KB per chunk
+                    local max_scan = 2097152     -- max 2MB scan for POST body
+                    local total = 0
+                    local prev_tail = ""
+                    local found = false
+
+                    while total < max_scan and not found do
+                        local chunk = f:read(chunk_size)
+                        if not chunk then break end
+                        total = total + #chunk
+
+                        -- prepend previous tail for cross-chunk matching
+                        local data = prev_tail .. chunk
+                        -- unescape ONCE per chunk (not per rule)
+                        local decoded = unescape(data)
+
+                        for _, rule in pairs(POST_RULES) do
+                            if rule ~= "" and rulematch(decoded, rule, "jo") then
+                                log_record('Deny_URL_POST', ngx.var.request_uri, "-", rule)
+                                f:close()
+                                if get_effective_config("waf_enable") == "on" then
+                                    waf_output()
+                                end
+                                return true
+                            end
+                        end
+
+                        -- keep last 512 bytes as overlap
+                        if #data > 512 then
+                            prev_tail = string.sub(data, -512)
+                        else
+                            prev_tail = data
+                        end
+                    end
+                    f:close()
+                    return false
+                end
             end
         end
         if body and #body > 0 then
+            -- unescape ONCE before the loop (not per rule)
+            local decoded_body = unescape(body)
             for _,rule in pairs(POST_RULES) do
-                if rule ~= "" and rulematch(unescape(body), rule, "jo") then
+                if rule ~= "" and rulematch(decoded_body, rule, "jo") then
                     log_record('Deny_URL_POST', ngx.var.request_uri, "-", rule)
                     if get_effective_config("waf_enable") == "on" then
                         waf_output()

@@ -171,42 +171,88 @@ function get_domain()
     return domain
 end
 
---Match domain in domain_config table (exact + wildcard)
-local function match_domain(domain_config, domain)
-    -- exact match
-    local specific = domain_config[domain]
+--Worker-level domain config cache (avoids per-request cjson.decode)
+--Stores parsed Lua table + precompiled wildcard regexes
+local worker_domain_config = nil      -- parsed domain.json table
+local worker_wildcard_patterns = nil  -- precompiled: { {suffix=".example.com", cfg=...}, ... }
+local worker_domain_mtime = nil       -- mtime of last loaded domain.json
+
+--Match domain: O(1) exact lookup, then precompiled wildcard suffix match
+local function match_domain(domain)
+    if worker_domain_config == nil then
+        return nil
+    end
+    -- 1. exact match (hash lookup, O(1))
+    local specific = worker_domain_config[domain]
     if specific ~= nil then
         return specific
     end
-    -- wildcard match: *.example.com
-    for pattern, cfg in pairs(domain_config) do
-        if pattern ~= "_comment" and type(cfg) == "table" then
-            if string.find(pattern, "^%*%.") then
-                -- convert *.example.com -> ^.+\.example\.com$ (PCRE regex)
-                local regex = string.gsub(pattern, "%.", "\\.")
-                regex = string.gsub(regex, "^%*\\%.", "^.+\\.")
-                regex = regex .. "$"
-                if ngx.re.find(domain, regex, "ijo") then
-                    return cfg
-                end
+    -- 2. wildcard match: precompiled suffix strings (no regex per request)
+    if worker_wildcard_patterns then
+        for _, wc in ipairs(worker_wildcard_patterns) do
+            -- wc.suffix = ".example.com", domain ends with it → match
+            local suffix = wc.suffix
+            local dlen = #domain
+            local slen = #suffix
+            if dlen > slen and string.sub(domain, dlen - slen + 1) == suffix then
+                return wc.cfg
             end
         end
     end
     return nil
 end
 
---Get domain-level config (cached in shared dict, reloads when domain.json changes)
---Result is also cached per request via ngx.ctx
+--Load and parse domain.json into worker memory (called when mtime changes)
+--Precompiles wildcard patterns: *.example.com → suffix=".example.com"
+local function load_domain_config(filepath, mtime)
+    local io = require 'io'
+    local f = io.open(filepath, "r")
+    if f == nil then
+        worker_domain_config = nil
+        worker_wildcard_patterns = nil
+        worker_domain_mtime = nil
+        return
+    end
+    local content = f:read("*a")
+    f:close()
+
+    local cjson = require("cjson")
+    local ok, domain_config = pcall(cjson.decode, content)
+    if not ok or type(domain_config) ~= "table" then
+        worker_domain_config = nil
+        worker_wildcard_patterns = nil
+        worker_domain_mtime = nil
+        return
+    end
+
+    -- remove _comment
+    domain_config["_comment"] = nil
+
+    -- precompile wildcard patterns: *.example.com → suffix=".example.com"
+    local wildcards = {}
+    for pattern, cfg in pairs(domain_config) do
+        if type(cfg) == "table" and string.find(pattern, "^%*%.") then
+            -- *.example.com → .example.com (suffix match, no regex needed)
+            local suffix = string.sub(pattern, 2)  -- remove leading *, keep ".example.com"
+            table.insert(wildcards, { suffix = suffix, cfg = cfg })
+        end
+    end
+
+    worker_domain_config = domain_config
+    worker_wildcard_patterns = wildcards
+    worker_domain_mtime = mtime
+end
+
+--Get domain-level config (worker-level Lua table cache, no per-request cjson.decode)
+--Reloads only when domain.json mtime changes
+--Result is cached per request via ngx.ctx
 function get_domain_config()
     if ngx.ctx._domain_config_loaded then
         return ngx.ctx._domain_config
     end
     ngx.ctx._domain_config_loaded = true
 
-    local RULE_PATH = config_rule_dir
-    local DOMAIN_FILEPATH = RULE_PATH .. '/domain.json'
-
-    -- get file mtime (real mtime via lfs, or file size as fallback)
+    local DOMAIN_FILEPATH = config_rule_dir .. '/domain.json'
     local current_mtime = get_file_mtime(DOMAIN_FILEPATH)
 
     -- file not found → no domain config, use globals
@@ -215,45 +261,13 @@ function get_domain_config()
         return nil
     end
 
-    -- check shared dict cache
-    if waf_cache then
-        local cached_mtime = waf_cache:get("domain_json_mtime")
-        local cached_data = waf_cache:get("domain_json_data")
-        if cached_mtime == current_mtime and cached_data ~= nil then
-            local cjson = require("cjson")
-            local ok, domain_config = pcall(cjson.decode, cached_data)
-            if ok and type(domain_config) == "table" then
-                local result = match_domain(domain_config, get_domain())
-                ngx.ctx._domain_config = result
-                return result
-            end
-        end
+    -- check if worker cache is current (mtime comparison, no decode)
+    if worker_domain_mtime ~= current_mtime then
+        load_domain_config(DOMAIN_FILEPATH, current_mtime)
     end
 
-    -- read and parse file
-    local io = require 'io'
-    local f = io.open(DOMAIN_FILEPATH, "r")
-    if f == nil then
-        ngx.ctx._domain_config = nil
-        return nil
-    end
-    local content = f:read("*a")
-    f:close()
-
-    local cjson = require("cjson")
-    local ok, domain_config = pcall(cjson.decode, content)
-    if not ok or type(domain_config) ~= "table" then
-        ngx.ctx._domain_config = nil
-        return nil
-    end
-
-    -- update cache (with TTL for file-size fallback mode)
-    if waf_cache then
-        waf_cache:set("domain_json_mtime", current_mtime, cache_ttl)
-        waf_cache:set("domain_json_data", content, cache_ttl)
-    end
-
-    local result = match_domain(domain_config, get_domain())
+    -- match domain from worker-level Lua table (O(1) exact + suffix match)
+    local result = match_domain(get_domain())
     ngx.ctx._domain_config = result
     return result
 end
@@ -267,51 +281,29 @@ function get_effective_config(key)
     return _G["config_" .. key]
 end
 
---Read rule lines from a file, return table (cached in shared dict)
+--Worker-level rule cache (avoids per-request cjson.decode)
+--key: filepath → { mtime=, rules=Lua table }
+local worker_rule_cache = {}
+
+--Read rule lines from a file (cached in worker memory, no per-request cjson.decode)
 local function read_rule_file(filepath)
-    -- get file mtime (real mtime via lfs, or file size as fallback)
     local current_mtime = get_file_mtime(filepath)
     if current_mtime == nil then
+        worker_rule_cache[filepath] = nil
         return nil
     end
 
-    -- check shared dict cache
-    if waf_cache then
-        local cache_key = "rule:" .. filepath
-        local cached_mtime = waf_cache:get(cache_key .. "_mtime")
-        local cached_data = waf_cache:get(cache_key .. "_data")
-        if cached_mtime == current_mtime and cached_data ~= nil then
-            local cjson = require("cjson")
-            local ok, rules = pcall(cjson.decode, cached_data)
-            if ok and type(rules) == "table" then
-                return rules
-            end
-        end
-
-        -- cache miss: read and parse file
-        local io = require 'io'
-        local f = io.open(filepath, "r")
-        if f == nil then
-            return nil
-        end
-        local content = f:read("*a")
-        f:close()
-
-        local cjson = require("cjson")
-        local t = {}
-        for line in content:gmatch("[^\r\n]+") do
-            table.insert(t, line)
-        end
-        -- update cache (with TTL for file-size fallback mode)
-        waf_cache:set(cache_key .. "_mtime", current_mtime, cache_ttl)
-        waf_cache:set(cache_key .. "_data", cjson.encode(t), cache_ttl)
-        return t
+    -- check worker-level cache (mtime comparison only, no decode)
+    local entry = worker_rule_cache[filepath]
+    if entry and entry.mtime == current_mtime then
+        return entry.rules
     end
 
-    -- no cache: parse directly
+    -- cache miss: read and parse file
     local io = require 'io'
     local f = io.open(filepath, "r")
     if f == nil then
+        worker_rule_cache[filepath] = nil
         return nil
     end
     local content = f:read("*a")
@@ -321,6 +313,7 @@ local function read_rule_file(filepath)
     for line in content:gmatch("[^\r\n]+") do
         table.insert(t, line)
     end
+    worker_rule_cache[filepath] = { mtime = current_mtime, rules = t }
     return t
 end
 
@@ -356,29 +349,38 @@ function get_rule(rulefilename)
     return rules
 end
 
---WAF log record for json,(use logstash codec => json)
---Uses ngx.timer.at for async file write to avoid blocking worker
---Falls back to sync write if timer API unavailable
-local function async_write_log(log_name, log_line)
-    -- try async via timer
+--WAF log: batch buffer per worker (avoids per-attack open/write/close)
+--Buffer flushes every 1 second or when buffer reaches 100 entries
+local log_buffer = {}
+local log_buffer_count = 0
+local LOG_FLUSH_INTERVAL = 100   -- max entries before flush
+local log_last_flush_time = 0
+
+--Flush log buffer to file (single open/write/close for batch)
+local function flush_log_buffer(log_name)
+    if log_buffer_count == 0 then return end
+    local lines = table.concat(log_buffer, "\n") .. "\n"
+    log_buffer = {}
+    log_buffer_count = 0
+
+    -- async via timer
     local ok = pcall(function()
         ngx.timer.at(0, function(premature)
             if premature then return end
             local io = require 'io'
             local file = io.open(log_name, "a")
             if file then
-                file:write(log_line .. "\n")
+                file:write(lines)
                 file:flush()
                 file:close()
             end
         end)
     end)
     if not ok then
-        -- fallback: sync write
         local io = require 'io'
         local file = io.open(log_name, "a")
         if file then
-            file:write(log_line .. "\n")
+            file:write(lines)
             file:flush()
             file:close()
         end
@@ -387,7 +389,6 @@ end
 
 function log_record(method,url,data,ruletag)
     local cjson = require("cjson")
-    local io = require 'io'
     local LOG_PATH = config_log_dir
     local CLIENT_IP = get_client_ip()
     local USER_AGENT = get_user_agent()
@@ -408,19 +409,28 @@ function log_record(method,url,data,ruletag)
     local LOG_LINE = cjson.encode(log_json_obj)
     local LOG_NAME = LOG_PATH..'/'..ngx.today().."_waf.log"
 
-    -- log rotation: if file > 100MB, rename to .old
-    local file_size = 0
-    local f_check = io.open(LOG_NAME, "r")
-    if f_check then
-        file_size = f_check:seek("end")
-        f_check:close()
-    end
-    if file_size > 104857600 then  -- 100MB
-        local os_cmd = require("os")
-        os_cmd.rename(LOG_NAME, LOG_NAME .. ".old")
+    -- log rotation: check file size only every 60s (not per attack)
+    local now = ngx.time()
+    if now - log_last_flush_time > 60 then
+        log_last_flush_time = now
+        local io = require 'io'
+        local f_check = io.open(LOG_NAME, "r")
+        if f_check then
+            local file_size = f_check:seek("end")
+            f_check:close()
+            if file_size > 104857600 then  -- 100MB
+                local os_cmd = require("os")
+                os_cmd.rename(LOG_NAME, LOG_NAME .. ".old")
+            end
+        end
     end
 
-    async_write_log(LOG_NAME, LOG_LINE)
+    -- buffer and batch flush
+    log_buffer_count = log_buffer_count + 1
+    log_buffer[log_buffer_count] = LOG_LINE
+    if log_buffer_count >= LOG_FLUSH_INTERVAL then
+        flush_log_buffer(LOG_NAME)
+    end
 end
 
 --WAF return (supports per-domain output config)
