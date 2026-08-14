@@ -90,3 +90,14 @@ java\.lang
 \/\.ssh\/
 \/authorized_keys
 \/terraform\.tfstate
+\/firebase.*\.json
+\/gcp-key\.json
+\/sa\.json
+\/service[-_]account.*\.json
+\/google-credentials\.json
+\/aws.*key
+\/\.aws\/
+\/\.gcloud\/
+\/cloudflare.*\.json
+\/push_config\.json
+\/gc-service\.json
