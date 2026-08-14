@@ -3,3 +3,4 @@
 (Awvs|Nessus|OpenVAS|Greenbone|Nexpose|Metasploit|Rapid7|Qualys|Tenable)
 (zgrab|nmap|masscan|nikto|dirb|gobuster|ffuf|dirmap|feroxbuster|wfuzz|skipfish|wapiti|whatweb|nuclei|httpx|naabu|subfinder|amass|shodan|censys)
 (Python-urllib|Python-requests|Go-http-client|scrapy|bot|crawl|spider|fetcher|checker|monitor|scraper)
+(Fiddler|Charles|Postman|archiver|JBH|JaEYeol|MySQLMAN|DTSN|absinthe|OSSTMM|Brutus|Caveman|CursedGoogle)

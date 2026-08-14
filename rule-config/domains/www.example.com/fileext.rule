@@ -1,2 +1,3 @@
 \.php\..*\.(htaccess|bash_history)
 \.(htaccess|bash_history|htpasswd|gitignore|gitattributes|env|config|sql|bak|backup|old|tmp|log|swp|sql.gz)
+\.(phtml|pht|php5|php7|php8|phar|shtml|cgi|pl|py|rb|war|jsp|jspx|asp|aspx|exe|dll|so|msi|bat|cmd|ps1|vbs|wsf|reg|crt|pem|key)
