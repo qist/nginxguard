@@ -290,9 +290,8 @@ location 级 (set $waf_enable off;)    ← 最高优先级
 **gRPC 长连接关闭 WAF**：
 
 ```nginx
-location /sbwhgrpc {
+location /23456 {
     set $waf_enable off;
-    lua_need_request_body off;
     client_max_body_size 0;
     keepalive_requests 4294967296;
     client_body_timeout 1h;
@@ -301,7 +300,7 @@ location /sbwhgrpc {
     grpc_set_header X-Real-IP $clientRealIp;
     grpc_read_timeout 1h;
     grpc_send_timeout 1h;
-    grpc_pass grpc://vmess-grpc;
+    grpc_pass grpc://23456;
 }
 ```
 
