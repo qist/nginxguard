@@ -88,8 +88,10 @@ end
 local cache_ttl = mtime_reliable and 0 or 60
 
 --Convert glob-style wildcard pattern to regex
---192.168.0.* → ^192\.168\.0\.\d+$
---192.168.*.1  → ^192\.168\.\d+\.1$
+--IPv4: 192.168.0.* → ^192\.168\.0\.\d+$
+--IPv4: 192.168.*.1  → ^192\.168\.\d+\.1$
+--IPv6: 2001:db8::*  → ^2001\:db8\::[\da-fA-F:]+$
+--IPv6: 2001:*:1     → ^2001\:[\da-fA-F:]+\:1$
 --If no * found, return as-is (already regex)
 function glob_to_regex(pattern)
     if pattern == nil or pattern == "" then
@@ -101,8 +103,8 @@ function glob_to_regex(pattern)
     end
     -- escape special regex chars except * (prepend backslash)
     local regex = string.gsub(pattern, "([%.%+%-%?%[%]%(%)%$%^])", "\\%1")
-    -- replace * with \d+
-    regex = string.gsub(regex, "%*", "\\d+")
+    -- replace * with [\da-fA-F:]+ to match both IPv4 (digits) and IPv6 (hex + colon)
+    regex = string.gsub(regex, "%*", "[\\da-fA-F:]+")
     -- anchor full match
     return "^" .. regex .. "$"
 end
