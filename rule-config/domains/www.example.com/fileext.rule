@@ -1,0 +1,2 @@
+\.php\..*\.(htaccess|bash_history)
+\.(htaccess|bash_history|htpasswd|gitignore|gitattributes|env|config|sql|bak|backup|old|tmp|log|swp|sql.gz)

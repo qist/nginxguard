@@ -21,7 +21,6 @@ java\.lang
 \<(iframe|script|body|img|layer|div|meta|style|base|object|input)
 (onmouseover|onerror|onload)\=
 and\s+\d+=\d+
-and\s+(1=1|1=2|1=0|select|SELECT)
 or\s+\d+=\d+
 order\s+by\s+\d+
 proc\/self\/environ
