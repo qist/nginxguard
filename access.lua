@@ -449,6 +449,10 @@ end
 
 --WAF main entry
 local function waf_main()
+    -- per-location bypass: set $waf_enable off; in nginx location block
+    if ngx.var.waf_enable == "off" then
+        return
+    end
     -- domain-level waf switch (cached per request)
     if is_waf_enabled() == "off" then
         return

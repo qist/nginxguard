@@ -1,7 +1,7 @@
 # waf
 ## nginx waf 
 
-基于 Lua 的 Nginx WAF（Web Application Firewall），支持 **基于域名的规则配置**。
+基于 Lua 的 Nginx WAF（Web Application Firewall），支持 **基于域名的规则配置**、**IPv6 黑白名单**、**云凭据探测拦截** 等。
 
 ### 安装依赖
 ```sh
@@ -45,12 +45,12 @@ waf/
 └── rule-config/
     ├── domain.json         # 域名级规则配置（仅放需要覆盖全局的域名）
     ├── args.rule           # 全局 URL 参数规则
-    ├── blackip.rule        # 全局黑名单 IP
+    ├── blackip.rule        # 全局黑名单 IP（支持 IPv4/IPv6/通配符）
     ├── cookie.rule         # 全局 Cookie 规则
     ├── post.rule           # 全局 POST 规则
     ├── url.rule            # 全局 URL 规则
     ├── useragent.rule      # 全局 User-Agent 规则
-    ├── whiteip.rule        # 全局白名单 IP
+    ├── whiteip.rule        # 全局白名单 IP（支持 IPv4/IPv6/通配符）
     ├── whiteurl.rule       # 全局白名单 URL
     ├── whiteua.rule        # 全局白名单 UA（搜索引擎爬虫）
     ├── referer.rule        # 全局 Referer 规则
@@ -58,12 +58,12 @@ waf/
     └── domains/                # 域名专属规则目录
         └── www.example.com/
             ├── args.rule          # URL参数攻击规则
-            ├── blackip.rule       # 黑名单IP（空文件=无黑名单）
+            ├── blackip.rule       # 黑名单IP（支持 IPv4/IPv6/通配符，空文件=无黑名单）
             ├── cookie.rule        # Cookie攻击规则
             ├── post.rule          # POST攻击规则
             ├── url.rule           # URL路径攻击规则
             ├── useragent.rule     # User-Agent攻击规则
-            ├── whiteip.rule       # 白名单IP（空文件=无白名单）
+            ├── whiteip.rule       # 白名单IP（支持 IPv4/IPv6/通配符，空文件=无白名单）
             ├── whiteurl.rule      # URL白名单
             ├── whiteua.rule       # UA白名单（搜索引擎爬虫放行）
             ├── referer.rule       # Referer攻击规则
@@ -146,8 +146,8 @@ waf/
 
 | 规则文件 | 检测函数 | 说明 |
 |---------|---------|------|
-| `whiteip.rule` | `white_ip_check()` | IP 白名单 |
-| `blackip.rule` | `black_ip_check()` | IP 黑名单 |
+| `whiteip.rule` | `white_ip_check()` | IP 白名单（支持 IPv4/IPv6/通配符） |
+| `blackip.rule` | `black_ip_check()` | IP 黑名单（支持 IPv4/IPv6/通配符） |
 | `whiteurl.rule` | `white_url_check()` | URL 白名单 |
 | `whiteua.rule` | `user_agent_attack_check()` 内部调用 `is_white_ua()` | UA 白名单（搜索引擎爬虫放行，仅跳过 UA 黑名单检测） |
 | `url.rule` | `url_attack_check()` | URL 路径攻击检测 |
@@ -179,7 +179,7 @@ WAF 加载规则时，会先在域名 `rule_dir` 目录中查找，找不到再�
 - `whiteip.rule` → 空文件，不回退，该域名无白名单 IP
 - `blackip.rule` → 空文件，不回退，该域名无黑名单 IP
 
-> **提示**：如果希望某项规则回退全局，不要在域名目录放该文件（包括空文件）。空文件等于明确指定
+> **提示**：如果希望某项规则回退全局，不要在域名目录放该文件（包括空文件）。空文件等于明确指定"无规则"
 
 ### 使用示例
 
@@ -248,16 +248,223 @@ config_trust_proxy_headers = "off"
 
 ---
 
+## Location 级别开关
+
+除了域名级和全局级开关，WAF 还支持 **Nginx `location` 级别** 的开关。只需在需要关闭 WAF 的 `location` 中加一行：
+
+```nginx
+location /234567 {
+    set $waf_enable off;          # ← 关闭 WAF，就这一行
+
+    grpc_pass grpc://234567;
+}
+```
+
+### 工作原理
+
+WAF 在 `http` 块全局挂载（`access_by_lua_file`），每个请求进入时首先检查 Nginx 变量 `$waf_enable`：
+
+```lua
+if ngx.var.waf_enable == "off" then
+    return          -- 直接跳过所有 WAF 检测
+end
+```
+
+- **未设置 `$waf_enable`**（绝大多数 location）：变量为 `nil`，不等于 `"off"`，WAF 正常执行
+- **`set $waf_enable off;`**：该 location 下 WAF 完全跳过，不影响其他 location
+
+### 优先级
+
+```
+location 级 (set $waf_enable off;)    ← 最高优先级
+    ↓
+域名级 (domain.json 中 waf_enable)    ← 次之
+    ↓
+全局级 (config.lua 中 config_waf_enable)  ← 基线
+```
+
+> `location` 级开关会跳过**所有** WAF 检测（IP 黑白名单、CC、URL、POST 等），适用于 gRPC、WebSocket 等非 HTTP 标准请求路径。
+
+### 典型场景
+
+**gRPC 长连接关闭 WAF**：
+
+```nginx
+location /sbwhgrpc {
+    set $waf_enable off;
+    lua_need_request_body off;
+    client_max_body_size 0;
+    keepalive_requests 4294967296;
+    client_body_timeout 1h;
+    send_timeout 1h;
+    lingering_close always;
+    grpc_set_header X-Real-IP $clientRealIp;
+    grpc_read_timeout 1h;
+    grpc_send_timeout 1h;
+    grpc_pass grpc://vmess-grpc;
+}
+```
+
+**WebSocket 升级路径关闭 WAF**：
+
+```nginx
+location /ws {
+    set $waf_enable off;
+    proxy_pass http://backend;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+---
+
+## IPv6 支持
+
+WAF 的 IP 黑白名单（`blackip.rule` / `whiteip.rule`）全面支持 IPv4、IPv6 及通配符匹配。通配符 `*` 在匹配时会自动转换为 `[\da-fA-F:]+` 正则，可同时兼容 IPv4 数字段和 IPv6 十六进制+冒号段。
+
+### 支持的 IP 格式
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| 精确 IPv4 | `192.168.1.100` | 完全匹配单个 IPv4 地址 |
+| IPv4 通配符 | `192.168.*` | 匹配 `192.168.` 开头的所有 IPv4 |
+| IPv4 段通配 | `192.168.0.*` | 匹配 `192.168.0.0` ~ `192.168.0.255` |
+| IPv4 中间通配 | `192.168.*.1` | 匹配 `192.168.X.1` 的所有地址 |
+| 精确 IPv6 | `2001:db8::1` | 完全匹配单个 IPv6 地址 |
+| IPv6 通配符 | `2001:db8::*` | 匹配 `2001:db8::` 开头的所有 IPv6 |
+| IPv6 中间通配 | `2001:*:1` | 匹配 `2001:...:1` 的所有 IPv6 |
+| 正则表达式 | `^10\.\d+\.0\.\d+$` | 直接作为 PCRE 正则匹配 |
+
+### glob_to_regex 转换逻辑
+
+```
+输入: 192.168.0.*
+转义: 192\.168\.0\.*
+替换: 192\.168\.0\.[\da-fA-F:]+
+锚定: ^192\.168\.0\.[\da-fA-F:]+$
+
+输入: 2001:db8::*
+转义: 2001\:db8\::*
+替换: 2001\:db8\::[\da-fA-F:]+
+锚定: ^2001\:db8\::[\da-fA-F:]+$
+```
+
+> `[\da-fA-F:]+` 中的 `\d` 匹配 IPv4 数字段，`a-fA-F` 匹配 IPv6 十六进制字符，`:` 匹配 IPv6 冒号分隔符。一条正则同时兼容两种 IP 格式。
+
+### IPv6 规则文件示例
+
+```bash
+# blackip.rule
+8.8.8.8
+2001:db8::1
+2001:db8::*         # 封禁整个 2001:db8::/64 前缀
+10.0.*              # 封禁 10.0.0.0/16
+::1                 # 封禁 IPv6 本地回环
+fe80::*             # 封禁 IPv6 链路本地地址
+```
+
+### Nginx 监听 IPv6
+
+WAF 支持 IPv6 流量，需确保 Nginx 同时监听 IPv6 端口：
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;       # 监听 IPv6
+    server_name www.example.com;
+    # ...
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;  # 监听 IPv6 HTTPS
+    server_name www.example.com;
+    # ...
+}
+```
+
+当 `trust_proxy_headers = "on"` 时，WAF 从 `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP` 中提取客户端 IP，自动兼容 IPv6 格式。当 `trust_proxy_headers = "off"` 时，直接使用 `ngx.var.remote_addr`，Nginx 会返回 IPv6 格式的客户端地址（如 `::ffff:192.168.1.1` 或纯 IPv6 地址）。
+
+### IP 匹配流程
+
+```
+1. 遍历预编译的 glob 通配符规则（如 192.168.*、2001:db8::*）
+   → 使用 ngx.re.find(ip, "^192\.168\.[\da-fA-F:]+$", "jo") 匹配
+
+2. 遍历非通配符规则（如 8.8.8.8、2001:db8::1）
+   → 直接作为 PCRE 正则匹配
+
+3. 命中任意一条规则即返回 true
+```
+
+所有 glob 通配符规则在规则文件加载时**预编译为正则**并缓存，避免每请求重复调用 `glob_to_regex`。
+
+---
+
+## 云服务凭据探测拦截
+
+`url.rule` 中新增了针对云服务凭据和敏感配置文件的探测拦截规则，覆盖常见攻击者扫描路径：
+
+### 新增规则一览
+
+| 规则 | 拦截目标 |
+|------|----------|
+| `/firebase.*\.json` | Firebase 配置文件探测 |
+| `/gcp-key\.json` | GCP 服务账号密钥探测 |
+| `/sa\.json` | GCP Service Account 密钥 |
+| `/service[-_]account.*\.json` | 通用服务账号密钥 |
+| `/google-credentials\.json` | Google 凭据文件 |
+| `/aws.*key` | AWS Access Key 文件 |
+| `/\.aws\/` | AWS 凭据目录 |
+| `/\.gcloud\/` | GCP 凭据目录 |
+| `/cloudflare.*\.json` | Cloudflare API 配置 |
+| `/push_config\.json` | 推送服务配置 |
+| `/gc-service\.json` | GCP 服务配置 |
+
+### 其他敏感路径规则
+
+`url.rule` 还包含以下探测拦截：
+
+- **版本控制目录**：`/.git/`、`/.svn/`、`/.gitignore`、`/.dockerignore`
+- **环境配置文件**：`/.env`、`/.htaccess`、`/.htpasswd`、`/config.json|yml|yaml|xml`
+- **包管理文件**：`/composer.json`、`/package.json`、`/package-lock.json`、`/yarn.lock`、`/Pipfile`、`/requirements.txt`、`/Dockerfile`、`/docker-compose.yml`
+- **SSH 密钥**：`/id_rsa`、`/id_dsa`、`/.ssh/`、`/authorized_keys`、`/.npmrc`
+- **基础设施**：`/terraform.tfstate`、`/.idea/`、`/.vscode/`
+- **管理后台**：`/wp-admin/`、`/administrator/`、`/phpmyadmin`、`/manager/html`、`/jmx-console/`
+- **框架暴露**：`/actuator/*`（Spring Boot）、`/swagger-ui`、`/api-docs`、`/h2-console`、`/druid/`、`/struts2`、`/console`
+- **系统敏感路径**：`/proc/self/`、`/etc/passwd`、`/etc/shadow`、`/var/log/`、`/boot.ini`、`/system32/`、`/cmd.exe`
+- **Webshell 探测**：`/shell.php`、`/eval.php`、`/cmd.php`、`/upload.php`、`/connector.php`
+
+---
+
 ## 规则缓存与热加载
 
 ### 缓存机制
 
-WAF 使用 `ngx.shared.dict` 缓存规则文件和域名配置，避免每次请求都读磁盘。缓存失效策略基于**文件修改时间（mtime）**：
+WAF 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存规则文件和域名配置，避免每次请求都读磁盘。缓存失效策略基于**文件修改时间（mtime）**：
 
 - **LuaJIT FFI `stat()`**（首选）：通过 FFI 直接调用 libc 的 `stat()` 系统函数获取文件 mtime，**无需编译任何 C 模块**，纯 Lua 实现。支持现代 glibc（`stat()`）和旧版 glibc（`__xstat()`），兼容 x86_64 和 aarch64。
 - **文件大小回退**（降级）：当 FFI 不可用时，回退为使用文件大小 + 60 秒 TTL 作为缓存失效判断。可靠性略低于 mtime，但功能正常。
 
-修改规则文件后**无需 reload nginx**，下次请求自动检测到 mtime 变化并重新加载规则。
+修改规则文件后**无需 reload nginx**，下次请求（或 10 秒 TTL 过期后）自动检测到 mtime 变化并重新加载规则。
+
+### 缓存层次
+
+| 层级 | 存储位置 | 缓存内容 | 失效策略 |
+|------|---------|---------|---------|
+| Worker 级 | Lua 模块变量 | 规则文件内容 + 合并正则 + 预编译 glob | TTL 10s + mtime 检查 |
+| Worker 级 | Lua 模块变量 | domain.json 解析结果 + 通配符后缀 | TTL 10s + mtime 检查 |
+| Worker 级 | Lua 模块变量 | cc_rate 解析结果（count/seconds） | 配置变更时重解析 |
+| 请求级 | `ngx.ctx` | `_client_ip`、`_domain`、`_domain_config`、`_waf_enabled` | 每请求自动清除 |
+
+### 预编译优化
+
+| 优化项 | 说明 |
+|--------|------|
+| glob 预编译 | IP 通配符规则（`192.168.*`、`2001:db8::*`）在加载时预编译为 regex，缓存到 `glob_compiled` |
+| 合并正则 | N 条规则合并为 `(?:rule1\|rule2\|...)`，正常流量匹配从 O(N) 降至 O(1) |
+| 通配符后缀预编译 | `*.example.com` 预编译为 `.example.com` 后缀字符串匹配，无需正则 |
 
 ### 白名单 UA 安全说明
 
@@ -276,9 +483,40 @@ WAF 使用 `ngx.shared.dict` 缓存规则文件和域名配置，避免每次请
 
 这样设计可以防止攻击者伪造搜索引擎 UA 来绕过 WAF 的其他安全检测。
 
-### 日志
+---
 
-WAF 日志中新增了 `domain` 字段，记录触发规则的请求域名，便于按域名分析攻击日志。
+## 日志
+
+### 同步写入机制
+
+WAF 日志采用**同步写入**策略，确保攻击日志在 `ngx.exit(403)` 前已落盘，不会因 Nginx 请求终止而丢失：
+
+```lua
+local file = io.open(LOG_NAME, "a")
+file:write(LOG_LINE .. "\n")
+file:flush()    -- 强制刷盘
+file:close()
+```
+
+> 只有检测到攻击时才触发日志写入，正常流量**零日志开销**。
+
+### 日志格式
+
+每条日志为一行 JSON，字段如下：
+
+| 字段 | 说明 |
+|------|------|
+| `@timestamp` | UTC 时间戳（ISO 8601 格式） |
+| `client_ip` | 客户端 IP（IPv4 或 IPv6） |
+| `local_time` | 本地时间 |
+| `server_name` | 请求域名（剥离端口后的小写域名） |
+| `user_agent` | 客户端 User-Agent |
+| `attack_method` | 拦截类型（见下表） |
+| `req_url` | 请求 URL |
+| `req_data` | 请求数据/匹配到的规则 |
+| `rule_tag` | 命中的具体规则内容 |
+
+### attack_method 枚举
 
 | attack_method | 说明 |
 |---------------|------|
@@ -293,6 +531,12 @@ WAF 日志中新增了 `domain` 字段，记录触发规则的请求域名，便
 | `Deny_Cookie` | Cookie 攻击拦截 |
 | `Deny_Referer` | Referer 拦截 |
 | `Deny_File_Upload` | 文件上传拦截 |
+
+### 日志轮转
+
+WAF 内置日志轮转：当日志文件超过 **100MB** 时自动重命名为 `*.old`。轮转检查每 60 秒执行一次（非每条日志），不影响写入性能。
+
+日志文件路径：`config_log_dir/YYYY-MM-DD_waf.log`
 
 ---
 
@@ -317,11 +561,13 @@ WAF 日志中新增了 `domain` 字段，记录触发规则的请求域名，便
 | 合并正则 | N 条规则合并为 `(?:rule1\|rule2\|...)`，正常流量匹配从 O(N) 降至 O(1) |
 | TTL 缓存 | 10s 缓存窗口消除每请求 ~10 次 `stat()` 系统调用 |
 | FFI stat | LuaJIT FFI 直接调用 libc `stat()` 获取 mtime，避免 Lua IO 开销 |
-| glob 预编译 | IP 通配符规则（`192.168.*`）在加载时预编译 regex |
+| glob 预编译 | IP 通配符规则（`192.168.*`、`2001:db8::*`）在加载时预编译 regex |
 | cc_rate 缓存 | CC 限速参数解析提升到 worker 级，仅配置变更时重解析 |
 | waf_enable 缓存 | 每请求 ~13 次 `get_effective_config` 改为 `ngx.ctx` 首次缓存 |
 | require 模块级 | `cjson`/`io`/`os` 从函数内 `require` 提到模块顶部 |
 | 消除冗余调用 | `file_upload_check`/`post_attack_check` 移除多余的 `get_rule` 调用 |
+| 同步日志 | 仅攻击触发时同步写入+flush，正常流量零 IO 开销 |
+| 请求级缓存 | `client_ip`/`domain`/`domain_config`/`waf_enable` 首次计算后缓存到 `ngx.ctx` |
 
 ### 测试结果
 
@@ -334,3 +580,43 @@ WAF 日志中新增了 `domain` 字段，记录触发规则的请求域名，便
 | WAF 全开（生产） | 34,692 | 275% | 69 MB | 12.8ms | — |
 
 > **结论**：经过合并正则、TTL 缓存、FFI stat、glob 预编译等深度优化后，WAF 全开相比 WAF 全关的吞吐下降 **< 2%**，P99 延迟增加约 2-3ms，内存增加约 1MB。在正常流量场景下，WAF 的性能开销几乎可以忽略不计。
+
+---
+
+## 安全检测流程
+
+每请求的检测顺序（命中任一项即拦截，后续不再执行）：
+
+```
+1. $waf_enable 检查（location 级开关，off 则跳过全部检测）
+       ↓
+2. waf_enable 检查（域名级/全局级开关，off 则跳过全部检测）
+       ↓
+3. white_ip_check     → 白名单 IP 放行
+       ↓
+4. white_url_check    → 白名单 URL 放行
+       ↓
+5. dynamic_black_ip   → 动态黑名单（CC 自动拉黑期内）
+       ↓
+6. black_ip_check     → 静态黑名单 IP
+       ↓
+7. user_agent_check   → User-Agent 攻击（白名单 UA 跳过此项）
+       ↓
+8. referer_check      → Referer 攻击
+       ↓
+9. cc_attack_check    → CC 限速
+       ↓
+10. cookie_check       → Cookie 攻击
+       ↓
+11. file_upload_check → 文件上传扩展名
+       ↓
+12. url_attack_check  → URL 路径攻击
+       ↓
+13. url_args_check    → URL 参数攻击
+       ↓
+14. post_check        → POST 攻击（表单 + JSON body）
+       ↓
+     放行
+```
+
+> 整个流程包裹在 `pcall` 中，任何意外错误均被捕获并记录到 `ngx.log(ngx.ERR)`，不会导致 500 错误返回给客户端。
