@@ -138,7 +138,14 @@ local function cookie_attack_check()
     if get_effective_config("cookie_check") == "on" then
         local USER_COOKIE = ngx.var.http_cookie
         if USER_COOKIE ~= nil then
+            -- check both raw and unescaped cookie to catch URL-encoded attacks
             local matched = match_any_rule('cookie.rule', USER_COOKIE, "jo")
+            if not matched then
+                local decoded = unescape(USER_COOKIE)
+                if decoded ~= USER_COOKIE then
+                    matched = match_any_rule('cookie.rule', decoded, "jo")
+                end
+            end
             if matched then
                 log_record('Deny_Cookie',ngx.var.request_uri,"-",matched)
                 if is_waf_enabled() == "on" then
