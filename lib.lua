@@ -465,41 +465,9 @@ function match_any_rule(rulefilename, input, flags)
     return ""  -- combined matched but individual didn't (edge case)
 end
 
---WAF log: batch buffer per worker (avoids per-attack open/write/close)
---Buffer flushes every 1 second or when buffer reaches 100 entries
-local log_buffer = {}
-local log_buffer_count = 0
-local LOG_FLUSH_INTERVAL = 100   -- max entries before flush
-local log_last_flush_time = 0
-
---Flush log buffer to file (single open/write/close for batch)
-local function flush_log_buffer(log_name)
-    if log_buffer_count == 0 then return end
-    local lines = table.concat(log_buffer, "\n") .. "\n"
-    log_buffer = {}
-    log_buffer_count = 0
-
-    -- async via timer
-    local ok = pcall(function()
-        ngx.timer.at(0, function(premature)
-            if premature then return end
-            local file = io.open(log_name, "a")
-            if file then
-                file:write(lines)
-                file:flush()
-                file:close()
-            end
-        end)
-    end)
-    if not ok then
-        local file = io.open(log_name, "a")
-        if file then
-            file:write(lines)
-            file:flush()
-            file:close()
-        end
-    end
-end
+--WAF log: synchronous write (attack logs must not be lost)
+--Only triggered on attack detection, normal traffic has zero log overhead
+local log_last_rotation_time = 0
 
 function log_record(method,url,data,ruletag)
     local LOG_PATH = config_log_dir
@@ -524,8 +492,8 @@ function log_record(method,url,data,ruletag)
 
     -- log rotation: check file size only every 60s (not per attack)
     local now = ngx.time()
-    if now - log_last_flush_time > 60 then
-        log_last_flush_time = now
+    if now - log_last_rotation_time > 60 then
+        log_last_rotation_time = now
         local f_check = io.open(LOG_NAME, "r")
         if f_check then
             local file_size = f_check:seek("end")
@@ -536,12 +504,17 @@ function log_record(method,url,data,ruletag)
         end
     end
 
-    -- buffer and batch flush
-    log_buffer_count = log_buffer_count + 1
-    log_buffer[log_buffer_count] = LOG_LINE
-    if log_buffer_count >= LOG_FLUSH_INTERVAL then
-        flush_log_buffer(LOG_NAME)
+    -- Synchronous write: ensures log is on disk before ngx.exit(403)
+    local file = io.open(LOG_NAME, "a")
+    if file then
+        file:write(LOG_LINE .. "\n")
+        file:flush()
+        file:close()
     end
+end
+
+--No-op, kept for backward compat (logs are now written synchronously)
+function flush_waf_logs()
 end
 
 --WAF return (supports per-domain output config)
