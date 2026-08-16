@@ -1,4 +1,4 @@
---WAF Action
+--NginxGuard Action
 require 'config'
 require 'lib'
 
@@ -454,7 +454,7 @@ local function post_attack_check()
     return false
 end
 
---WAF main entry
+--NginxGuard main entry
 local function waf_main()
     -- per-location bypass: set $waf_enable off; in nginx location block
     if ngx.var.waf_enable == "off" then
@@ -481,7 +481,7 @@ local function waf_main()
     end
 end
 
---run WAF, pcall to prevent 500 on any unexpected error (e.g. HTTP/2/HTTP/3)
+--run NginxGuard, pcall to prevent 500 on any unexpected error (e.g. HTTP/2/HTTP/3)
 local ok, err = pcall(waf_main)
 if not ok then
     ngx.log(ngx.ERR, "waf_main error: ", err)

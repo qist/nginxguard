@@ -1,5 +1,5 @@
 #!/bin/bash
-# WAF 场景测试: UA白名单+其他攻击拦截 / 域名独立规则 / Location开关
+# NginxGuard 场景测试: UA白名单+其他攻击拦截 / 域名独立规则 / Location开关
 # 精简版, 只测关键点
 
 TARGET="http://192.168.2.180"
@@ -24,7 +24,7 @@ set_config() { $SSH180 "sed -i 's/^config_$1 = .*/config_$1 = \"$2\"/' $WAF_CONF
 restart_nginx() { $SSH180 "$NGINX_CMD -s stop 2>/dev/null; sleep 1; $NGINX_CMD 2>&1"; sleep 2; }
 
 echo "========================================" | tee -a $RESULTS
-echo "  WAF 场景测试" | tee -a $RESULTS
+echo "  NginxGuard 场景测试" | tee -a $RESULTS
 echo "  时间: $(date '+%Y-%m-%d %H:%M:%S')" | tee -a $RESULTS
 echo "========================================" | tee -a $RESULTS
 
@@ -79,7 +79,7 @@ if [ "$code" = "403" ]; then ok "Googlebot + Upload .sql" "$code"; else bad "Goo
 echo -e "\n${CYAN}=== 场景2: 域名独立配置规则 ===${NC}" | tee -a $RESULTS
 
 echo -e "${YELLOW}  --- www.example.com (url_check=off, 独立rule_dir) ---${NC}" | tee -a $RESULTS
-# url_check=off: URL路径攻击应放行 (WAF不拦截, nginx找不到文件返回404)
+# url_check=off: URL路径攻击应放行 (NginxGuard不拦截, nginx找不到文件返回404)
 test_rule "www.example.com /etc/passwd (url_check=off, 404=放行)" 404 -H "Host: www.example.com" -A "Mozilla/5.0" "$TARGET/etc/passwd"
 test_rule "www.example.com /.env (url_check=off, 404=放行)" 404 -H "Host: www.example.com" -A "Mozilla/5.0" "$TARGET/.env"
 test_rule "www.example.com /wp-admin/ (url_check=off, 404=放行)" 404 -H "Host: www.example.com" -A "Mozilla/5.0" "$TARGET/wp-admin/"
@@ -90,7 +90,7 @@ test_rule "www.example.com XSS (args仍on)" 403 -H "Host: www.example.com" -A "M
 test_rule "www.example.com sqlmap UA" 403 -H "Host: www.example.com" -A "sqlmap/1.0" "$TARGET/"
 # POST 仍检测
 test_rule "www.example.com POST SQL (post仍on)" 403 -H "Host: www.example.com" -A "Mozilla/5.0" -d "id=1+union+select+1" "$TARGET/"
-# 域名独立 whiteurl (WAF放行, nginx找不到文件返回404)
+# 域名独立 whiteurl (NginxGuard放行, nginx找不到文件返回404)
 test_rule "www.example.com 白名单URL /123/ (404=放行)" 404 -H "Host: www.example.com" -A "Mozilla/5.0" "$TARGET/123/"
 # 域名独立 whiteip
 test_rule "www.example.com 白名单IP 8.8.8.8" 200 -H "Host: www.example.com" -A "Mozilla/5.0" -H "X-Forwarded-For: 8.8.8.8" "$TARGET/?id=union+select"
@@ -103,7 +103,7 @@ test_rule "api.example.com sqlmap UA (waf off)" 200 -H "Host: api.example.com" -
 test_rule "api.example.com POST SQL (waf off, 405=放行)" 405 -H "Host: api.example.com" -A "Mozilla/5.0" -d "id=1+union+select+1" "$TARGET/"
 
 echo -e "${YELLOW}  --- test.test.com (*.test.com: post=off, cookie=off) ---${NC}" | tee -a $RESULTS
-# post_check=off: POST攻击应放行 (WAF不拦截, nginx静态root返回405)
+# post_check=off: POST攻击应放行 (NginxGuard不拦截, nginx静态root返回405)
 test_rule "test.test.com POST SQL (post=off, 405=放行)" 405 -H "Host: test.test.com" -A "Mozilla/5.0" -d "id=1+union+select+1" "$TARGET/"
 test_rule "test.test.com POST XSS (post=off, 405=放行)" 405 -H "Host: test.test.com" -A "Mozilla/5.0" -d "q=<script>alert(1)</script>" "$TARGET/"
 # cookie_check=off: Cookie攻击应放行
@@ -118,10 +118,10 @@ test_rule "unknown.com SQL注入 (全局)" 403 -H "Host: unknown.com" -A "Mozill
 test_rule "unknown.com /etc/passwd (全局)" 403 -H "Host: unknown.com" -A "Mozilla/5.0" "$TARGET/etc/passwd"
 
 # ============================================================
-# 场景3: Location 级 WAF 开关
+# 场景3: Location 级 NginxGuard 开关
 # /nowaf/ location 中 set $waf_enable off
 # ============================================================
-echo -e "\n${CYAN}=== 场景3: Location 级 WAF 开关 ===${NC}" | tee -a $RESULTS
+echo -e "\n${CYAN}=== 场景3: Location 级 NginxGuard 开关 ===${NC}" | tee -a $RESULTS
 
 echo -e "${YELLOW}  --- /nowaf/ 下全部放行 ---${NC}" | tee -a $RESULTS
 test_rule "/nowaf/ 正常GET" 200 -A "Mozilla/5.0" "$TARGET/nowaf/"

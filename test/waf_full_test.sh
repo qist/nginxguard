@@ -1,6 +1,6 @@
 #!/bin/bash
-# Nginx WAF 规则全量测试 v2
-# 测试目标: 192.168.2.180 (Nginx WAF on port 80)
+# NginxGuard 规则全量测试 v2
+# 测试目标: 192.168.2.180 (NginxGuard on port 80)
 # 关键: 测试期间临时关闭 CC, CC 测试时临时开启, 测试后重启 nginx 清除封禁
 
 TARGET="http://192.168.2.180"
@@ -25,7 +25,7 @@ set_config() { $SSH180 "sed -i 's/^config_$1 = .*/config_$1 = \"$2\"/' $WAF_CONF
 restart_nginx() { $SSH180 "$NGINX_CMD -s stop 2>/dev/null; sleep 1; $NGINX_CMD 2>&1"; sleep 2; }
 
 echo "========================================" | tee -a $RESULTS
-echo "  Nginx WAF 规则全量测试 v2" | tee -a $RESULTS
+echo "  NginxGuard 规则全量测试 v2" | tee -a $RESULTS
 echo "  目标: $TARGET" | tee -a $RESULTS
 echo "  时间: $(date '+%Y-%m-%d %H:%M:%S')" | tee -a $RESULTS
 echo "========================================" | tee -a $RESULTS
@@ -41,7 +41,7 @@ sleep 2
 # 0. 基础连通性
 echo -e "${CYAN}=== 0. 基础连通性 ===${NC}" | tee -a $RESULTS
 code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" "$TARGET/")
-if [ "$code" = "200" ]; then log "Nginx WAF 已启动 (HTTP 200), CC 已临时关闭"; else log "FATAL: HTTP $code"; exit 1; fi
+if [ "$code" = "200" ]; then log "NginxGuard 已启动 (HTTP 200), CC 已临时关闭"; else log "FATAL: HTTP $code"; exit 1; fi
 echo "" | tee -a $RESULTS
 
 # 1. 正常请求
@@ -349,8 +349,8 @@ echo "  CC: 放行 $CC_PASS 次, 拦截 $CC_BLOCK 次" | tee -a $RESULTS
 if [ "$CC_BLOCK" -gt 0 ]; then ok "CC 检测触发" "403"; else bad "CC 检测未触发" "0" "403"; fi
 echo "" | tee -a $RESULTS
 
-# 16. WAF 日志检查
-echo -e "${CYAN}=== 16. WAF 日志检查 ===${NC}" | tee -a $RESULTS
+# 16. NginxGuard 日志检查
+echo -e "${CYAN}=== 16. NginxGuard 日志检查 ===${NC}" | tee -a $RESULTS
 LOGFILE="/opt/nginx/log/$(date +%Y-%m-%d)_waf.log"
 if [ -f "$LOGFILE" ]; then
     echo "  日志文件: $LOGFILE" | tee -a $RESULTS

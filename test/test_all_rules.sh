@@ -1,8 +1,8 @@
 #!/bin/bash
-# Nginx WAF 规则全量测试
-# 测试目标: 192.168.2.180 (Nginx WAF on port 80)
+# NginxGuard 规则全量测试
+# 测试目标: 192.168.2.180 (NginxGuard on port 80)
 # 参考: /opt/caddyguard 的测试点设计
-# 规则引擎: Nginx Lua WAF (access.lua + lib.lua + config.lua)
+# 规则引擎: NginxGuard (access.lua + lib.lua + config.lua)
 # 规则版本: 2026-08-14 最新
 
 TARGET="http://192.168.2.180"
@@ -23,7 +23,7 @@ test_rule() {
 }
 
 echo "========================================" | tee -a $RESULTS
-echo "  Nginx WAF 规则全量测试" | tee -a $RESULTS
+echo "  NginxGuard 规则全量测试" | tee -a $RESULTS
 echo "  目标: $TARGET (192.168.2.180:80)" | tee -a $RESULTS
 echo "  时间: $(date '+%Y-%m-%d %H:%M:%S')" | tee -a $RESULTS
 echo "========================================" | tee -a $RESULTS
@@ -32,7 +32,7 @@ echo "" | tee -a $RESULTS
 # 0. 基础连通性
 echo -e "${CYAN}=== 0. 基础连通性 ===${NC}" | tee -a $RESULTS
 code=$(curl -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" "$TARGET/")
-if [ "$code" = "200" ]; then log "Nginx WAF 已启动 (HTTP 200)"; else log "FATAL: HTTP $code"; exit 1; fi
+if [ "$code" = "200" ]; then log "NginxGuard 已启动 (HTTP 200)"; else log "FATAL: HTTP $code"; exit 1; fi
 echo "" | tee -a $RESULTS
 
 # 1. 正常请求

@@ -1,45 +1,69 @@
-# waf
-## nginx waf 
+# NginxGuard
+## NginxGuard
 
-基于 Lua 的 Nginx WAF（Web Application Firewall），支持 **基于域名的规则配置**、**IPv6 黑白名单**、**云凭据探测拦截** 等。
+基于 Lua 的 NginxGuard（Web Application Firewall），支持 **基于域名的规则配置**、**IPv6 黑白名单**、**云凭据探测拦截** 等。
 
 ### 安装依赖
+
 ```sh
-# 安装依赖
- yum install -y lua-devel 
- git clone https://github.com/openresty/luajit2.git
- cd luajit2
- make -j$(nproc) && make -j$(nproc) install
- ln -sf /usr/local/lib/libluajit-5.1.so.2 /lib64/libluajit-5.1.so.2
- cd ../
- wget https://www.kyne.com.au/~mark/software/download/lua-cjson-2.1.0.tar.gz
- tar -xzvf lua-cjson-2.1.0.tar.gz
- cd lua-cjson-2.1.0
- make -j$(nproc) && make -j$(nproc) install
- cd ../
- git clone https://github.com/diegonehab/luasocket.git
- cd luasocket
- make -j$(nproc) && make -j$(nproc) install
- export LUAJIT_LIB=/usr/local/lib
- export LUAJIT_INC=/usr/local/include/luajit-2.1
- cd ../
- git clone https://github.com/simplresty/ngx_devel_kit.git
- git clone --branch v0.10.14 https://github.com/openresty/lua-nginx-module.git
-  # 下载nginx
-  wget https://nginx.org/download/nginx-1.15.10.tar.gz
-  tar -xvf nginx-1.15.10.tar.gz
-  cd nginx-1.15.10
-  ./configure --add-module=../lua-nginx-module \
-             --add-module=../ngx_devel_kit 
+# 1. 安装编译依赖
+yum install -y gcc make git wget \
+    pcre-devel zlib-devel openssl-devel \
+    libxml2-devel libxslt-devel gd-devel
+
+# 2. 编译安装 LuaJIT2 (OpenResty 分支)
+git clone https://github.com/openresty/luajit2.git
+cd luajit2
+make -j$(nproc) && make install
+ln -sf /usr/local/lib/libluajit-5.1.so.2 /lib64/libluajit-5.1.so.2
+cd ../
+
+# 3. 编译安装 lua-cjson (OpenResty 官方 fork)
+git clone https://github.com/openresty/lua-cjson.git
+cd lua-cjson
+# 需指定 LuaJIT 的头文件和库路径
+export LUAJIT_LIB=/usr/local/lib
+export LUAJIT_INC=/usr/local/include/luajit-2.1
+make -j$(nproc) && make install
+cd ../
+
+# 4. 下载 lua-nginx-module (最新稳定版 v0.10.31)
+git clone --branch v0.10.31 https://github.com/openresty/lua-nginx-module.git
+
+# 5. 下载 ngx_devel_kit (lua-nginx-module 的前置依赖)
+git clone https://github.com/simplresty/ngx_devel_kit.git
+
+# 6. 下载并编译 Nginx (mainline 1.31.3, 如需 stable 可用 1.30.4)
+wget https://nginx.org/download/nginx-1.31.3.tar.gz
+tar -xvf nginx-1.31.3.tar.gz
+cd nginx-1.31.3
+
+export LUAJIT_LIB=/usr/local/lib
+export LUAJIT_INC=/usr/local/include/luajit-2.1
+
+./configure \
+    --add-module=../ngx_devel_kit \
+    --add-module=../lua-nginx-module \
+    --with-http_ssl_module \
+    --with-http_v2_module \
+    --with-http_realip_module \
+    --with-http_stub_status_module \
+    --with-http_gzip_static_module \
+    --with-http_gunzip_module \
+    --with-threads \
+    --with-file-aio
+make -j$(nproc) && make install
 ```
+
+> 完整的静态编译方案（含全部第三方模块和 Lua 生态静态编入）见 [nginx-binaries](https://github.com/qist/nginx-binaries)。
 
 ### 文件结构
 ```
 waf/
 ├── config.lua              # 全局配置（开关、日志路径、规则目录等）
 ├── init.lua                # init_by_lua_file 预加载模块
-├── access.lua              # access_by_lua_file 每请求 WAF 检测入口
-├── lib.lua                 # WAF 核心库（IP获取、规则加载、域名配置、日志、输出）
+├── access.lua              # access_by_lua_file 每请求 NginxGuard 检测入口
+├── lib.lua                 # NginxGuard 核心库（IP获取、规则加载、域名配置、日志、输出）
 ├── nginx-config/
 │   └── nginx.conf          # nginx 配置示例
 └── rule-config/
@@ -114,8 +138,8 @@ waf/
 
 | 字段 | 说明 | 对应 config.lua 变量 |
 |------|------|---------------------|
-| `waf_enable` | WAF 总开关 | `config_waf_enable` |
-| `trust_proxy_headers` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=WAF 在 CDN/反代后，信任转发头；`"off"`=WAF 直接暴露，只用 `remote_addr` 防伪造 | `config_trust_proxy_headers` |
+| `waf_enable` | NginxGuard 总开关 | `config_waf_enable` |
+| `trust_proxy_headers` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=NginxGuard 在 CDN/反代后，信任转发头；`"off"`=NginxGuard 直接暴露，只用 `remote_addr` 防伪造 | `config_trust_proxy_headers` |
 | `white_url_check` | 白名单 URL 检测 | `config_white_url_check` |
 | `white_ua_check` | 白名单 UA 检测（搜索引擎爬虫放行，仅跳过 UA 黑名单检测，不影响 URL/POST/CC 等其他检测） | `config_white_ua_check` |
 | `white_ip_check` | 白名单 IP 检测 | `config_white_ip_check` |
@@ -142,7 +166,7 @@ waf/
 
 ### 域名专属规则目录
 
-在域名配置中设置 `rule_dir` 后，WAF 加载规则文件时会优先从该目录读取。所有规则文件都支持域名独立配置：
+在域名配置中设置 `rule_dir` 后，NginxGuard 加载规则文件时会优先从该目录读取。所有规则文件都支持域名独立配置：
 
 | 规则文件 | 检测函数 | 说明 |
 |---------|---------|------|
@@ -164,7 +188,7 @@ waf/
 
 #### 规则文件回退机制
 
-WAF 加载规则时，会先在域名 `rule_dir` 目录中查找，找不到再回退到全局 `rule-config/` 目录。**关键区别在于文件是否存在**：
+NginxGuard 加载规则时，会先在域名 `rule_dir` 目录中查找，找不到再回退到全局 `rule-config/` 目录。**关键区别在于文件是否存在**：
 
 | 域名目录中 | 行为 | 说明 |
 |:---------:|------|------|
@@ -183,7 +207,7 @@ WAF 加载规则时，会先在域名 `rule_dir` 目录中查找，找不到再�
 
 ### 使用示例
 
-**场景 1：为 API 域名关闭 WAF**
+**场景 1：为 API 域名关闭 NginxGuard**
 ```json
 "api.example.com": {
     "waf_enable": "off"
@@ -223,12 +247,12 @@ WAF 加载规则时，会先在域名 `rule_dir` 目录中查找，找不到再�
 ```
 CC 超限后 IP 自动加入 `badGuys` 共享字典，600 秒内所有请求直接 403，600 秒后自动解封。设为 `0` 则关闭自动拉黑，只拦截当前请求。
 
-**场景 6：WAF 直接暴露公网，防止 IP 伪造**
+**场景 6：NginxGuard 直接暴露公网，防止 IP 伪造**
 ```lua
 -- config.lua
 config_trust_proxy_headers = "off"
 ```
-当 WAF 不在 CDN/反向代理后面时，设置为 `"off"` 可防止攻击者伪造 `X-Forwarded-For` 头绕过 IP 黑白名单和 CC 限制。此时 WAF 只使用 TCP 连接的真实远端 IP（`remote_addr`）。支持域名级覆盖：
+当 NginxGuard 不在 CDN/反向代理后面时，设置为 `"off"` 可防止攻击者伪造 `X-Forwarded-For` 头绕过 IP 黑白名单和 CC 限制。此时 NginxGuard 只使用 TCP 连接的真实远端 IP（`remote_addr`）。支持域名级覆盖：
 
 ```json
 {
@@ -244,17 +268,17 @@ config_trust_proxy_headers = "off"
 
 ### 不使用域名配置
 
-如果 `rule-config/domain.json` 文件不存在或格式错误，WAF 会自动回退到 `config.lua` 中的全局配置，行为与旧版完全一致。
+如果 `rule-config/domain.json` 文件不存在或格式错误，NginxGuard 会自动回退到 `config.lua` 中的全局配置，行为与旧版完全一致。
 
 ---
 
 ## Location 级别开关
 
-除了域名级和全局级开关，WAF 还支持 **Nginx `location` 级别** 的开关。只需在需要关闭 WAF 的 `location` 中加一行：
+除了域名级和全局级开关，NginxGuard 还支持 **Nginx `location` 级别** 的开关。只需在需要关闭 NginxGuard 的 `location` 中加一行：
 
 ```nginx
 location /234567 {
-    set $waf_enable off;          # ← 关闭 WAF，就这一行
+    set $waf_enable off;          # ← 关闭 NginxGuard，就这一行
 
     grpc_pass grpc://234567;
 }
@@ -262,16 +286,16 @@ location /234567 {
 
 ### 工作原理
 
-WAF 在 `http` 块全局挂载（`access_by_lua_file`），每个请求进入时首先检查 Nginx 变量 `$waf_enable`：
+NginxGuard 在 `http` 块全局挂载（`access_by_lua_file`），每个请求进入时首先检查 Nginx 变量 `$waf_enable`：
 
 ```lua
 if ngx.var.waf_enable == "off" then
-    return          -- 直接跳过所有 WAF 检测
+    return          -- 直接跳过所有 NginxGuard 检测
 end
 ```
 
-- **未设置 `$waf_enable`**（绝大多数 location）：变量为 `nil`，不等于 `"off"`，WAF 正常执行
-- **`set $waf_enable off;`**：该 location 下 WAF 完全跳过，不影响其他 location
+- **未设置 `$waf_enable`**（绝大多数 location）：变量为 `nil`，不等于 `"off"`，NginxGuard 正常执行
+- **`set $waf_enable off;`**：该 location 下 NginxGuard 完全跳过，不影响其他 location
 
 ### 优先级
 
@@ -283,11 +307,11 @@ location 级 (set $waf_enable off;)    ← 最高优先级
 全局级 (config.lua 中 config_waf_enable)  ← 基线
 ```
 
-> `location` 级开关会跳过**所有** WAF 检测（IP 黑白名单、CC、URL、POST 等），适用于 gRPC、WebSocket 等非 HTTP 标准请求路径。
+> `location` 级开关会跳过**所有** NginxGuard 检测（IP 黑白名单、CC、URL、POST 等），适用于 gRPC、WebSocket 等非 HTTP 标准请求路径。
 
 ### 典型场景
 
-**gRPC 长连接关闭 WAF**：
+**gRPC 长连接关闭 NginxGuard**：
 
 ```nginx
 location /23456 {
@@ -304,7 +328,7 @@ location /23456 {
 }
 ```
 
-**WebSocket 升级路径关闭 WAF**：
+**WebSocket 升级路径关闭 NginxGuard**：
 
 ```nginx
 location /ws {
@@ -320,7 +344,7 @@ location /ws {
 
 ## IPv6 支持
 
-WAF 的 IP 黑白名单（`blackip.rule` / `whiteip.rule`）全面支持 IPv4、IPv6 及通配符匹配。通配符 `*` 在匹配时会自动转换为 `[\da-fA-F:]+` 正则，可同时兼容 IPv4 数字段和 IPv6 十六进制+冒号段。
+NginxGuard 的 IP 黑白名单（`blackip.rule` / `whiteip.rule`）全面支持 IPv4、IPv6 及通配符匹配。通配符 `*` 在匹配时会自动转换为 `[\da-fA-F:]+` 正则，可同时兼容 IPv4 数字段和 IPv6 十六进制+冒号段。
 
 ### 支持的 IP 格式
 
@@ -365,7 +389,7 @@ fe80::*             # 封禁 IPv6 链路本地地址
 
 ### Nginx 监听 IPv6
 
-WAF 支持 IPv6 流量，需确保 Nginx 同时监听 IPv6 端口：
+NginxGuard 支持 IPv6 流量，需确保 Nginx 同时监听 IPv6 端口：
 
 ```nginx
 server {
@@ -383,7 +407,7 @@ server {
 }
 ```
 
-当 `trust_proxy_headers = "on"` 时，WAF 从 `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP` 中提取客户端 IP，自动兼容 IPv6 格式。当 `trust_proxy_headers = "off"` 时，直接使用 `ngx.var.remote_addr`，Nginx 会返回 IPv6 格式的客户端地址（如 `::ffff:192.168.1.1` 或纯 IPv6 地址）。
+当 `trust_proxy_headers = "on"` 时，NginxGuard 从 `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP` 中提取客户端 IP，自动兼容 IPv6 格式。当 `trust_proxy_headers = "off"` 时，直接使用 `ngx.var.remote_addr`，Nginx 会返回 IPv6 格式的客户端地址（如 `::ffff:192.168.1.1` 或纯 IPv6 地址）。
 
 ### IP 匹配流程
 
@@ -441,7 +465,7 @@ server {
 
 ### 缓存机制
 
-WAF 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存规则文件和域名配置，避免每次请求都读磁盘。缓存失效策略基于**文件修改时间（mtime）**：
+NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存规则文件和域名配置，避免每次请求都读磁盘。缓存失效策略基于**文件修改时间（mtime）**：
 
 - **LuaJIT FFI `stat()`**（首选）：通过 FFI 直接调用 libc 的 `stat()` 系统函数获取文件 mtime，**无需编译任何 C 模块**，纯 Lua 实现。支持现代 glibc（`stat()`）和旧版 glibc（`__xstat()`），兼容 x86_64 和 aarch64。
 - **文件大小回退**（降级）：当 FFI 不可用时，回退为使用文件大小 + 60 秒 TTL 作为缓存失效判断。可靠性略低于 mtime，但功能正常。
@@ -480,7 +504,7 @@ WAF 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存规则文
 | 文件上传检测 (`fileext.rule`) | ❌ 仍检测 |
 | IP 黑白名单 | ❌ 仍检测 |
 
-这样设计可以防止攻击者伪造搜索引擎 UA 来绕过 WAF 的其他安全检测。
+这样设计可以防止攻击者伪造搜索引擎 UA 来绕过 NginxGuard 的其他安全检测。
 
 ---
 
@@ -488,7 +512,7 @@ WAF 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存规则文
 
 ### 同步写入机制
 
-WAF 日志采用**同步写入**策略，确保攻击日志在 `ngx.exit(403)` 前已落盘，不会因 Nginx 请求终止而丢失：
+NginxGuard 日志采用**同步写入**策略，确保攻击日志在 `ngx.exit(403)` 前已落盘，不会因 Nginx 请求终止而丢失：
 
 ```lua
 local file = io.open(LOG_NAME, "a")
@@ -533,7 +557,7 @@ file:close()
 
 ### 日志轮转
 
-WAF 内置日志轮转：当日志文件超过 **100MB** 时自动重命名为 `*.old`。轮转检查每 60 秒执行一次（非每条日志），不影响写入性能。
+NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命名为 `*.old`。轮转检查每 60 秒执行一次（非每条日志），不影响写入性能。
 
 日志文件路径：`config_log_dir/YYYY-MM-DD_waf.log`
 
@@ -572,13 +596,13 @@ WAF 内置日志轮转：当日志文件超过 **100MB** 时自动重命名为 `
 
 | 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
 |------|-------|-----|-----|-----|---------|
-| WAF 全关（基线） | 34,180 | 256% | 69 MB | 10.2ms | — |
-| WAF 全开（无 CC/POST） | 34,128 | 233% | 70 MB | 13.3ms | 0.2% |
-| WAF + CC | 34,202 | 169% | 70 MB | 9.1ms | — |
-| WAF + POST | 33,741 | 256% | 69 MB | 15.0ms | 1.3% |
-| WAF 全开（生产） | 34,692 | 275% | 69 MB | 12.8ms | — |
+| NginxGuard 全关（基线） | 34,180 | 256% | 69 MB | 10.2ms | — |
+| NginxGuard 全开（无 CC/POST） | 34,128 | 233% | 70 MB | 13.3ms | 0.2% |
+| NginxGuard + CC | 34,202 | 169% | 70 MB | 9.1ms | — |
+| NginxGuard + POST | 33,741 | 256% | 69 MB | 15.0ms | 1.3% |
+| NginxGuard 全开（生产） | 34,692 | 275% | 69 MB | 12.8ms | — |
 
-> **结论**：经过合并正则、TTL 缓存、FFI stat、glob 预编译等深度优化后，WAF 全开相比 WAF 全关的吞吐下降 **< 2%**，P99 延迟增加约 2-3ms，内存增加约 1MB。在正常流量场景下，WAF 的性能开销几乎可以忽略不计。
+> **结论**：经过合并正则、TTL 缓存、FFI stat、glob 预编译等深度优化后，NginxGuard 全开相比 NginxGuard 全关的吞吐下降 **< 2%**，P99 延迟增加约 2-3ms，内存增加约 1MB。在正常流量场景下，NginxGuard 的性能开销几乎可以忽略不计。
 
 ---
 

@@ -440,7 +440,7 @@ function match_ip_rule(rulefilename, ip)
     return nil
 end
 
---Get WAF rule (returns rules array only, for backward compat)
+--Get NginxGuard rule (returns rules array only, for backward compat)
 function get_rule(rulefilename)
     local entry = get_rule_entry(rulefilename)
     if entry == nil then return nil end
@@ -467,7 +467,7 @@ function match_any_rule(rulefilename, input, flags)
     return ""  -- combined matched but individual didn't (edge case)
 end
 
---WAF log: synchronous write (attack logs must not be lost)
+--NginxGuard log: synchronous write (attack logs must not be lost)
 --Only triggered on attack detection, normal traffic has zero log overhead
 local log_last_rotation_time = 0
 
@@ -519,7 +519,7 @@ end
 function flush_waf_logs()
 end
 
---WAF return (supports per-domain output config)
+--NginxGuard return (supports per-domain output config)
 function waf_output()
     local output_mode = get_effective_config("waf_output")
     if output_mode == "redirect" then
