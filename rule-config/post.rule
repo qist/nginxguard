@@ -136,7 +136,8 @@ log4j|jndi:|\$\{.*jndi
 \$\{.*env
 \$\{.*sys
 \$\{.*::-\}
-(?i:union)[\s/\*]+(?i:select)
+['"]\s*(?:-{2}|#|/\*)
+(?i:union)[\s/\*!0-9-]*(?:(?:all|distinct)[\s/\*!0-9-]*)?(?i:select)
 (?i:union).*select.*from
 (?i:insert)\s+(?i:into)\s+\w+\s*\(?.*(?i:values)\s*\(
 (?i:delete)\s+(?i:from|table)\s+\w+

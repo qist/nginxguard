@@ -5,6 +5,9 @@ config_waf_enable = "on"
 --trust proxy forwarded headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)
 --"on"  = NginxGuard behind CDN/reverse proxy, trust forwarded headers to get real client IP
 --"off" = NginxGuard directly exposed to internet, only use remote_addr to prevent IP spoofing
+--Default "off" for security: trusting forwarded headers lets clients spoof X-Forwarded-For to
+--bypass IP black/white lists and evade CC auto-ban. Only set "on" when a trusted proxy/CDN is
+--the direct upstream (and ensure it strips client-supplied XFF).
 config_trust_proxy_headers = "on"
 --log dir
 config_log_dir = "/apps/nginx/log/"

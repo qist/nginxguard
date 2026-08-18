@@ -215,6 +215,13 @@ local function cookie_attack_check()
                 if decoded ~= USER_COOKIE then
                     matched = match_any_rule('cookie.rule', decoded, "joi")
                 end
+                -- also decode JS unicode escapes (\u003c etc.) — same as POST body handling
+                if not matched then
+                    local js_decoded = decode_js_unicode(decoded)
+                    if js_decoded ~= decoded then
+                        matched = match_any_rule('cookie.rule', js_decoded, "joi")
+                    end
+                end
             end
             if matched then
                 log_record('Deny_Cookie',ngx.var.request_uri,"-",matched)
@@ -262,6 +269,12 @@ local function url_args_attack_check()
             if key and type(key) == "string" and #key > 0 then
                 local decoded_key = recursive_unescape(key)
                 local matched = match_any_rule('args.rule', decoded_key, "joi")
+                if not matched then
+                    local js_decoded_key = decode_js_unicode(decoded_key)
+                    if js_decoded_key ~= decoded_key then
+                        matched = match_any_rule('args.rule', js_decoded_key, "joi")
+                    end
+                end
                 if matched then
                     log_record('Deny_URL_Args',ngx.var.request_uri,"key:"..key,matched)
                     if is_waf_enabled() == "on" then
@@ -280,6 +293,12 @@ local function url_args_attack_check()
             if ARGS_DATA and type(ARGS_DATA) ~= "boolean" then
                 local decoded_val = recursive_unescape(ARGS_DATA)
                 local matched = match_any_rule('args.rule', decoded_val, "joi")
+                if not matched then
+                    local js_decoded_val = decode_js_unicode(decoded_val)
+                    if js_decoded_val ~= decoded_val then
+                        matched = match_any_rule('args.rule', js_decoded_val, "joi")
+                    end
+                end
                 if matched then
                     log_record('Deny_URL_Args',ngx.var.request_uri,"-",matched)
                     if is_waf_enabled() == "on" then

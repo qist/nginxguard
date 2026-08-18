@@ -24,8 +24,9 @@ java\.lang
 \$_(?i:GET|post|cookie|files|session|env|phplib|GLOBALS|SERVER)\[
 \<(iframe|script|body|img|layer|div|meta|style|base|object|input|svg)
 (onmouseover|onerror|onload)\=
-(?i:and)\s+['"]?\d+['"]?\s*=\s*['"]?\d+['"]?\s*([#\-]|/\*|--|\s*$)
-(?i:or)\s+['"]?\d+['"]?\s*=\s*['"]?\d+['"]?\s*([#\-]|/\*|--|\s*$)
+['"]\s*(?:-{2}|#|/\*)
+(?i:and)[\s/\*!-]*['"]?\d+['"]?\s*=\s*['"]?\d+['"]?\s*([#\-]|/\*|--|\s*$)
+(?i:or)[\s/\*!-]*['"]?\d+['"]?\s*=\s*['"]?\d+['"]?\s*([#\-]|/\*|--|\s*$)
 (?i:order)\s+(?i:by)\s+\d+\s+([#\-]|/\*|--|\s*$)
 proc\/self\/environ
 mosconfig\[[a-z0-9_]{1,200}\]=
@@ -136,7 +137,7 @@ log4j|jndi:|\$\{.*jndi
 \$\{.*env
 \$\{.*sys
 \$\{.*::-\}
-(?i:union)[\s/\*]+(?i:select)
+(?i:union)[\s/\*!0-9-]*(?:(?:all|distinct)[\s/\*!0-9-]*)?(?i:select)
 (?i:union).*select.*from
 (?i:insert)\s+(?i:into)\s+\w+\s*\(?.*(?i:values)\s*\(
 (?i:delete)\s+(?i:from|table)\s+\w+
