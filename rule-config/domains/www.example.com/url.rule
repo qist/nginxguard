@@ -188,9 +188,9 @@ java\.lang
 
 \/wp-config
 \/wp-content\/backup
-\/wp-content\/uploads
-\/wp-content\/plugins
-\/wp-includes
+\/wp-content\/uploads\/.*\.(php|phtml|pht|php5|php7|php8|phar|jsp|asp|aspx|cgi|pl|py|rb)
+\/wp-content\/plugins\/.*\.(php|phtml|pht|php5|php7|php8|phar)
+\/wp-includes\/.*\.(php|phtml|pht|php5|php7|php8|phar)
 \/wp-load\.php
 \/wp-blog-header\.php
 \/wp-mail\.php
@@ -199,10 +199,6 @@ java\.lang
 \/wp-trackback\.php
 \/wp-signup\.php
 \/wp-activate\.php
-\/license\.txt
-\/readme\.txt
-\/readme\.html
-\/readme\.md
 \/install\.php
 \/install\.sh
 \/setup\.php

@@ -398,7 +398,8 @@ local function post_attack_check()
                     POST_DATA = val
                 end
                 if POST_DATA and type(POST_DATA) ~= "boolean" then
-                    local matched = match_any_rule('post.rule', POST_DATA, "joi")
+                    local decoded_post = recursive_unescape(POST_DATA)
+                    local matched = match_any_rule('post.rule', decoded_post, "joi")
                     if matched then
                         log_record('Deny_URL_POST', ngx.var.request_body, "-", matched)
                         if is_waf_enabled() == "on" then
