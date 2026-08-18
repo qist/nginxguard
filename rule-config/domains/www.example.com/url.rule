@@ -252,8 +252,6 @@ java\.lang
 \/htaccess
 \/htpasswd
 \/\.well-known\/
-\/sitemap\.xml
-\/robots\.txt
 \/crossdomain\.xml
 \/clientaccesspolicy\.xml
 \/web\.xml
