@@ -4,7 +4,7 @@
 
 TARGET="http://192.168.2.180"
 SSH180="ssh 192.168.2.180"
-NGINX_CMD="/opt/nginx/nginx -c /opt/nginx/conf/nginx.conf"
+NGINX_CMD="cd /opt/nginx && ./nginx -p /opt/nginx/ -c conf/nginx.conf"
 WAF_CONFIG="/opt/nginx/lua/waf/config.lua"
 PASS=0; FAIL=0; TOTAL=0; ERRORS=""
 RESULTS="/tmp/waf_scenario_test.txt"
@@ -20,8 +20,8 @@ test_rule() {
     local actual=$(curl --globoff -s -m 10 -o /dev/null -w "%{http_code}" "$@" 2>/dev/null)
     if [ "$actual" = "$expect" ]; then ok "$name" "$actual"; else bad "$name" "$actual" "$expect"; fi
 }
-set_config() { $SSH180 "sed -i 's/^config_$1 = .*/config_$1 = \"$2\"/' $WAF_CONFIG"; }
-restart_nginx() { $SSH180 "$NGINX_CMD -s stop 2>/dev/null; sleep 1; $NGINX_CMD 2>&1"; sleep 2; }
+set_config() { $SSH180 "sed -i \"s|^config_$1 = .*|config_$1 = \\\"$2\\\"|\" $WAF_CONFIG"; }
+restart_nginx() { $SSH180 "kill -TERM \$(cat /opt/nginx/logs/nginx.pid) 2>/dev/null; sleep 1; cd /opt/nginx && ./nginx -p /opt/nginx/ -c conf/nginx.conf 2>&1"; sleep 2; }
 
 echo "========================================" | tee -a $RESULTS
 echo "  NginxGuard 场景测试" | tee -a $RESULTS
@@ -156,6 +156,7 @@ test_rule "/nowaf/ Googlebot + /etc/passwd (404=放行)" 404 -A "Googlebot/2.1" 
 
 # 后处理: 恢复 CC
 set_config "cc_check" "on"
+set_config "cc_rate" "150/60"
 restart_nginx
 log "CC 已恢复, nginx 已重启"
 

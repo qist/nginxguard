@@ -131,13 +131,15 @@ local function is_valid_ip(s)
 end
 
 --Convert IPv4 dotted-quad to 32-bit number (returns nil on invalid)
+--Returns signed 32-bit (LuaJIT bit ops use signed 32-bit), so bit.tobit() ensures
+--all IPv4 numbers are in the same numeric domain for comparisons
 local function ipv4_to_num(s)
     local a, b, c, d = s:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
     if not a then return nil end
     a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
     if not (a and b and c and d) then return nil end
     if a > 255 or b > 255 or c > 255 or d > 255 then return nil end
-    return a * 16777216 + b * 65536 + c * 256 + d
+    return bit.tobit(a * 16777216 + b * 65536 + c * 256 + d)
 end
 
 --Binary search: find if ip_num falls within any range in sorted list
@@ -201,13 +203,14 @@ end
 --Convert IPv6 to 4 x 32-bit numbers (each fits in LuaJIT 32-bit bit ops)
 --groups 1-2 → chunk0, groups 3-4 → chunk1, groups 5-6 → chunk2, groups 7-8 → chunk3
 --Returns (c0, c1, c2, c3) or nil on invalid
+--bit.tobit() ensures values are signed 32-bit, same domain as bit.band() results
 local function ipv6_to_chunks(s)
     local g = ipv6_expand(s)
     if g == nil then return nil end
-    local c0 = tonumber(g[1], 16) * 65536 + tonumber(g[2], 16)
-    local c1 = tonumber(g[3], 16) * 65536 + tonumber(g[4], 16)
-    local c2 = tonumber(g[5], 16) * 65536 + tonumber(g[6], 16)
-    local c3 = tonumber(g[7], 16) * 65536 + tonumber(g[8], 16)
+    local c0 = bit.tobit(tonumber(g[1], 16) * 65536 + tonumber(g[2], 16))
+    local c1 = bit.tobit(tonumber(g[3], 16) * 65536 + tonumber(g[4], 16))
+    local c2 = bit.tobit(tonumber(g[5], 16) * 65536 + tonumber(g[6], 16))
+    local c3 = bit.tobit(tonumber(g[7], 16) * 65536 + tonumber(g[8], 16))
     return c0, c1, c2, c3
 end
 --IPv4: 192.168.0.* → ^192\.168\.0\.\d+$

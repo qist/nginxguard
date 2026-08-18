@@ -5,8 +5,9 @@
 
 TARGET="http://192.168.2.180"
 SSH180="ssh 192.168.2.180"
-NGINX_CMD="/opt/nginx/nginx -c /opt/nginx/conf/nginx.conf"
+NGINX_CMD="cd /opt/nginx && ./nginx -p /opt/nginx/ -c conf/nginx.conf"
 WAF_CONFIG="/opt/nginx/lua/waf/config.lua"
+WAF_LOG_DIR="/opt/nginx/log"
 PASS=0; FAIL=0; TOTAL=0; ERRORS=""
 RESULTS="/tmp/waf_test_results.txt"
 > $RESULTS
@@ -21,8 +22,8 @@ test_rule() {
     local actual=$(curl --globoff -s -m 10 -o /dev/null -w "%{http_code}" "$@" 2>/dev/null)
     if [ "$actual" = "$expect" ]; then ok "$name" "$actual"; else bad "$name" "$actual" "$expect"; fi
 }
-set_config() { $SSH180 "sed -i 's/^config_$1 = .*/config_$1 = \"$2\"/' $WAF_CONFIG"; }
-restart_nginx() { $SSH180 "$NGINX_CMD -s stop 2>/dev/null; sleep 1; $NGINX_CMD 2>&1"; sleep 2; }
+set_config() { $SSH180 "sed -i \"s|^config_$1 = .*|config_$1 = \\\"$2\\\"|\" $WAF_CONFIG"; }
+restart_nginx() { $SSH180 "kill -TERM \$(cat /opt/nginx/logs/nginx.pid) 2>/dev/null; sleep 1; cd /opt/nginx && ./nginx -p /opt/nginx/ -c conf/nginx.conf 2>&1"; sleep 2; }
 
 echo "========================================" | tee -a $RESULTS
 echo "  NginxGuard 规则全量测试 v2" | tee -a $RESULTS
@@ -54,7 +55,7 @@ echo "" | tee -a $RESULTS
 
 # 2. URL 路径攻击 (url.rule)
 echo -e "${CYAN}=== 2. URL 路径攻击检测 (url.rule) ===${NC}" | tee -a $RESULTS
-for path in /etc/passwd /etc/shadow /.env /.htaccess /.htpasswd /wp-admin/ /wp-login.php /phpinfo.php /xmlrpc.php /administrator/ /actuator/env /actuator/health /actuator/beans /h2-console /druid/ /swagger-ui /api-docs /v2/api-docs /.git/config /.svn/ /proc/self/environ /var/log/test /boot.ini /cmd.exe /cgi-bin/test /manager/html /jmx-console/ /struts2 /console /composer.json /package.json /Dockerfile /.gitignore /docker-compose.yml /.idea/workspace /.vscode/settings /id_rsa /.ssh/authorized_keys /terraform.tfstate /firebase.json /gcp-key.json /sa.json /.aws/credentials /shell.php /eval.php /config.json /test.sql /.DS_Store /server-status /WEB-INF/web.xml /Pipfile /requirements.txt /.npmrc /yarn.lock /swagger-resources /server-info /scripts/ /rest/ /backup/test /upload.php /connector.php /config.yml /database.sql /credentials /id_dsa /authorized_keys /.gcloud/ /gc-service.json /push_config.json; do
+for path in /etc/passwd /etc/shadow /.env /.htaccess /.htpasswd /wp-admin/ /wp-login.php /phpinfo.php /xmlrpc.php /administrator/ /actuator/env /actuator/health /actuator/beans /h2-console /druid/ /swagger-ui /api-docs /v2/api-docs /.git/config /.svn/ /proc/self/environ /var/log/test /boot.ini /cmd.exe /cgi-bin/test /manager/html /jmx-console/ /struts2 /console /composer.json /package.json /Dockerfile /.gitignore /docker-compose.yml /.idea/workspace /.vscode/settings /id_rsa /.ssh/authorized_keys /terraform.tfstate /firebase.json /gcp-key.json /sa.json /.aws/credentials /shell.php /eval.php /config.json /test.sql /.DS_Store /server-status /WEB-INF/web.xml /Pipfile /requirements.txt /.npmrc /yarn.lock /swagger-resources /server-info /scripts/ /upload.php /connector.php /config.yml /database.sql /credentials /id_dsa /authorized_keys /.gcloud/ /gc-service.json /push_config.json; do
     test_rule "Path $path" 403 -H "User-Agent: Mozilla/5.0" "${TARGET}${path}"
 done
 echo "" | tee -a $RESULTS
@@ -283,10 +284,49 @@ for ext in txt jpg png pdf; do
 done
 echo "" | tee -a $RESULTS
 
-# 10. 白名单 IP
-echo -e "${CYAN}=== 10. 白名单 IP ===${NC}" | tee -a $RESULTS
+# 10. 白名单 IP / XFF 信任链 / trust_proxy_headers
+echo -e "${CYAN}=== 10. 白名单 IP / XFF 信任链 / trust_proxy_headers ===${NC}" | tee -a $RESULTS
+
+# 10a. 白名单 IP 通过 XFF 放行 (cdnip.rule 包含内网 IP → XFF 被信任)
+# 10a. 非白名单 IP 通过 XFF 请求 SQLi → 应拦截 (XFF 被信任，拿到非白名单 IP，SQLi 拦截)
+code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 1.2.3.4" "$TARGET/?id=union+select")
+if [ "$code" = "403" ]; then ok "XFF非白名单IP 1.2.3.4 + SQLi 拦截" "$code"; else bad "XFF非白名单IP 1.2.3.4 + SQLi" "$code" "403"; fi
+
+# 10b. 白名单 IP 通过 XFF 放行
 code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 8.8.8.8" "$TARGET/?id=union+select")
-if [ "$code" = "200" ]; then ok "White IP 8.8.8.8+SQLi" "$code"; else bad "White IP 8.8.8.8" "$code" "200"; fi
+if [ "$code" = "200" ]; then ok "XFF白名单IP 8.8.8.8 放行" "$code"; else bad "XFF白名单IP 8.8.8.8" "$code" "200"; fi
+
+# 10c. 临时移除 cdnip.rule → XFF 被无条件信任 → 白名单 IP 放行
+$SSH180 "mv /opt/nginx/lua/waf/rule-config/cdnip.rule /opt/nginx/lua/waf/rule-config/cdnip.rule.bak 2>/dev/null"
+sleep 3
+$SSH180 "$NGINX_CMD -s reload 2>&1"
+sleep 2
+code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 8.8.8.8" "$TARGET/?id=union+select")
+if [ "$code" = "200" ]; then ok "无 cdnip.rule: XFF白名单IP 8.8.8.8 放行" "$code"; else bad "无 cdnip.rule: XFF白名单IP 8.8.8.8" "$code" "200"; fi
+# 10d. 无 cdnip.rule → 非白名单 IP + SQLi → 应拦截
+code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 1.2.3.4" "$TARGET/?id=union+select")
+if [ "$code" = "403" ]; then ok "无 cdnip.rule: XFF非白名单IP 1.2.3.4 + SQLi 拦截" "$code"; else bad "无 cdnip.rule: XFF非白名单IP 1.2.3.4 + SQLi" "$code" "403"; fi
+# 恢复 cdnip.rule
+$SSH180 "mv /opt/nginx/lua/waf/rule-config/cdnip.rule.bak /opt/nginx/lua/waf/rule-config/cdnip.rule 2>/dev/null"
+sleep 3
+$SSH180 "$NGINX_CMD -s reload 2>&1"
+sleep 2
+
+# 10e. trust_proxy_headers=off → 不信任 XFF，用 remote_addr → SQLi 拦截
+set_config "trust_proxy_headers" "off"
+sleep 3
+$SSH180 "$NGINX_CMD -s reload 2>&1"
+sleep 2
+code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 8.8.8.8" "$TARGET/?id=union+select")
+if [ "$code" = "403" ]; then ok "trust_proxy_headers=off: XFF被忽略，SQLi拦截" "$code"; else bad "trust_proxy_headers=off: XFF被忽略" "$code" "403"; fi
+# 10f. trust_proxy_headers=off → 不信任 XFF → 正常请求放行
+code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 8.8.8.8" "$TARGET/")
+if [ "$code" = "200" ]; then ok "trust_proxy_headers=off: 正常请求放行" "$code"; else bad "trust_proxy_headers=off: 正常请求" "$code" "200"; fi
+# 恢复 trust_proxy_headers=on
+set_config "trust_proxy_headers" "on"
+sleep 3
+$SSH180 "$NGINX_CMD -s reload 2>&1"
+sleep 2
 echo "" | tee -a $RESULTS
 
 # 11. 白名单 URL
@@ -339,6 +379,8 @@ echo "  临时开启 CC 检测..." | tee -a $RESULTS
 set_config "cc_check" "on"
 $SSH180 "$NGINX_CMD -s reload 2>&1"
 sleep 3
+echo "  临时设置 cc_rate=60/60 方便测试" | tee -a $RESULTS
+set_config "cc_rate" "60/60"
 echo "  发送 80 个请求 (cc_rate=60/60)" | tee -a $RESULTS
 CC_PASS=0; CC_BLOCK=0
 for i in $(seq 1 80); do
@@ -351,7 +393,7 @@ echo "" | tee -a $RESULTS
 
 # 16. NginxGuard 日志检查
 echo -e "${CYAN}=== 16. NginxGuard 日志检查 ===${NC}" | tee -a $RESULTS
-LOGFILE="/opt/nginx/log/$(date +%Y-%m-%d)_waf.log"
+LOGFILE="$WAF_LOG_DIR/$(date +%Y-%m-%d)_waf.log"
 if [ -f "$LOGFILE" ]; then
     echo "  日志文件: $LOGFILE" | tee -a $RESULTS
     echo "  日志条数: $(wc -l < $LOGFILE)" | tee -a $RESULTS
@@ -367,7 +409,9 @@ echo "" | tee -a $RESULTS
 # 后处理: 恢复 CC + 重启 nginx
 echo -e "${CYAN}=== 后处理: 恢复 CC + 重启 nginx ===${NC}" | tee -a $RESULTS
 set_config "cc_check" "on"
-restart_nginx
+set_config "cc_rate" "150/60"
+$SSH180 "kill -TERM \$(cat /opt/nginx/logs/nginx.pid) 2>/dev/null; sleep 1; cd /opt/nginx && ./nginx -p /opt/nginx/ -c conf/nginx.conf 2>&1"
+sleep 2
 log "CC 检测已恢复, nginx 已重启清除封禁"
 echo "" | tee -a $RESULTS
 

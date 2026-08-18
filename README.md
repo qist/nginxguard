@@ -69,12 +69,13 @@ waf/
 └── rule-config/
     ├── domain.json         # 域名级规则配置（仅放需要覆盖全局的域名）
     ├── args.rule           # 全局 URL 参数规则
-    ├── blackip.rule        # 全局黑名单 IP（支持 IPv4/IPv6/通配符）
+    ├── blackip.rule        # 全局黑名单 IP（支持 IPv4/IPv6 CIDR/通配符/精确IP）
+    ├── cdnip.rule          # CDN/可信代理 IP 列表（控制 XFF 信任，支持 CIDR）
     ├── cookie.rule         # 全局 Cookie 规则
     ├── post.rule           # 全局 POST 规则
     ├── url.rule            # 全局 URL 规则
     ├── useragent.rule      # 全局 User-Agent 规则
-    ├── whiteip.rule        # 全局白名单 IP（支持 IPv4/IPv6/通配符）
+    ├── whiteip.rule        # 全局白名单 IP（支持 IPv4/IPv6 CIDR/通配符/精确IP）
     ├── whiteurl.rule       # 全局白名单 URL
     ├── whiteua.rule        # 全局白名单 UA（搜索引擎爬虫）
     ├── referer.rule        # 全局 Referer 规则
@@ -82,12 +83,12 @@ waf/
     └── domains/                # 域名专属规则目录
         └── www.example.com/
             ├── args.rule          # URL参数攻击规则
-            ├── blackip.rule       # 黑名单IP（支持 IPv4/IPv6/通配符，空文件=无黑名单）
+            ├── blackip.rule       # 黑名单IP（支持 IPv4/IPv6 CIDR/通配符/精确IP，空文件=无黑名单）
             ├── cookie.rule        # Cookie攻击规则
             ├── post.rule          # POST攻击规则
             ├── url.rule           # URL路径攻击规则
             ├── useragent.rule     # User-Agent攻击规则
-            ├── whiteip.rule       # 白名单IP（支持 IPv4/IPv6/通配符，空文件=无白名单）
+            ├── whiteip.rule       # 白名单IP（支持 IPv4/IPv6 CIDR/通配符/精确IP，空文件=无白名单）
             ├── whiteurl.rule      # URL白名单
             ├── whiteua.rule       # UA白名单（搜索引擎爬虫放行）
             ├── referer.rule       # Referer攻击规则
@@ -247,12 +248,40 @@ NginxGuard 加载规则时，会先在域名 `rule_dir` 目录中查找，找不
 ```
 CC 超限后 IP 自动加入 `badGuys` 共享字典，600 秒内所有请求直接 403，600 秒后自动解封。设为 `0` 则关闭自动拉黑，只拦截当前请求。
 
-**场景 6：NginxGuard 直接暴露公网，防止 IP 伪造**
+**场景 6：NginxGuard 在 CDN 后面，仅信任 CDN IP 的 XFF**
+
+当 NginxGuard 部署在 CDN/反向代理后面时，需要从 `X-Forwarded-For` 获取真实客户端 IP。但直接信任 XFF 会让攻击者伪造该头绕过 IP 黑白名单。
+
+解决方案：在 `config.lua` 中设置 `trust_proxy_headers = "on"`，并在 `rule-config/cdnip.rule` 中配置 CDN 的 IP 段：
+
 ```lua
 -- config.lua
-config_trust_proxy_headers = "off"
+config_trust_proxy_headers = "on"
 ```
-当 NginxGuard 不在 CDN/反向代理后面时，设置为 `"off"` 可防止攻击者伪造 `X-Forwarded-For` 头绕过 IP 黑白名单和 CC 限制。此时 NginxGuard 只使用 TCP 连接的真实远端 IP（`remote_addr`）。支持域名级覆盖：
+
+```bash
+# rule-config/cdnip.rule
+# Cloudflare IPv4
+173.245.48.0/20
+103.21.244.0/22
+104.16.0.0/13
+# Cloudflare IPv6
+2400:cb00::/32
+2606:4700::/32
+# 内部代理
+10.0.0.0/8
+```
+
+此时 NginxGuard 的行为：
+
+| 条件 | XFF 处理 | 说明 |
+|------|---------|------|
+| `remote_addr` 在 cdnip.rule 中 | 信任 XFF | 提取真实客户端 IP |
+| `remote_addr` 不在 cdnip.rule 中 | 不信任 XFF | 使用 `remote_addr`（防直连伪造） |
+| `cdnip.rule` 文件不存在 | 信任所有 XFF | 原始行为，向后兼容 |
+| `cdnip.rule` 文件为空 | 信任所有 XFF | 同上 |
+
+支持域名级覆盖：
 
 ```json
 {
@@ -264,7 +293,13 @@ config_trust_proxy_headers = "off"
     }
 }
 ```
-上面的例子中，`www.example.com` 走 CDN 信任转发头，而 `direct.example.com` 直连暴露只认 `remote_addr`，互不影响。
+
+**场景 7：NginxGuard 直接暴露公网，防止 IP 伪造**
+```lua
+-- config.lua
+config_trust_proxy_headers = "off"
+```
+当 NginxGuard 不在 CDN/反向代理后面时，设置为 `"off"` 可防止攻击者伪造 `X-Forwarded-For` 头绕过 IP 黑白名单和 CC 限制。此时 NginxGuard 只使用 TCP 连接的真实远端 IP（`remote_addr`）。
 
 ### 不使用域名配置
 
@@ -342,49 +377,61 @@ location /ws {
 
 ---
 
-## IPv6 支持
+## IP 规则与 CIDR 支持
 
-NginxGuard 的 IP 黑白名单（`blackip.rule` / `whiteip.rule`）全面支持 IPv4、IPv6 及通配符匹配。通配符 `*` 在匹配时会自动转换为 `[\da-fA-F:]+` 正则，可同时兼容 IPv4 数字段和 IPv6 十六进制+冒号段。
+NginxGuard 的 IP 规则文件（`blackip.rule` / `whiteip.rule` / `cdnip.rule`）全面支持 IPv4、IPv6、CIDR、通配符和精确 IP 匹配。所有 IP 规则文件使用统一的预编译引擎，支持 `#` 注释行。
 
 ### 支持的 IP 格式
 
 | 格式 | 示例 | 说明 |
 |------|------|------|
-| 精确 IPv4 | `192.168.1.100` | 完全匹配单个 IPv4 地址 |
-| IPv4 通配符 | `192.168.*` | 匹配 `192.168.` 开头的所有 IPv4 |
+| IPv4 CIDR | `192.168.0.0/16` | 匹配 192.168.0.0 ~ 192.168.255.255（二分查找 O(log n)） |
+| IPv6 CIDR | `2001:db8::/32` | 匹配 2001:db8:0000:0000:... ~ 2001:db8:ffff:... |
+| IPv4 精确 | `192.168.1.100` | 完全匹配单个 IPv4 地址 |
+| IPv6 精确 | `2001:db8::1` | 完全匹配单个 IPv6 地址（大小写不敏感） |
+| IPv4 通配符 | `192.168.*` | 匹配 `192.168.` 开头的所有 IPv4（`*` → `\d+`） |
 | IPv4 段通配 | `192.168.0.*` | 匹配 `192.168.0.0` ~ `192.168.0.255` |
-| IPv4 中间通配 | `192.168.*.1` | 匹配 `192.168.X.1` 的所有地址 |
-| 精确 IPv6 | `2001:db8::1` | 完全匹配单个 IPv6 地址 |
-| IPv6 通配符 | `2001:db8::*` | 匹配 `2001:db8::` 开头的所有 IPv6 |
-| IPv6 中间通配 | `2001:*:1` | 匹配 `2001:...:1` 的所有 IPv6 |
-| 正则表达式 | `^10\.\d+\.0\.\d+$` | 直接作为 PCRE 正则匹配 |
+| IPv6 通配符 | `2001:db8::*` | 匹配 `2001:db8::` 开头的所有 IPv6（`*` → `[\da-fA-F:]+`） |
+| 注释行 | `# Cloudflare IPs` | `#` 开头的行自动跳过 |
 
 ### glob_to_regex 转换逻辑
 
+IPv4 和 IPv6 通配符使用不同的替换策略，防止跨格式误匹配：
+
 ```
-输入: 192.168.0.*
-转义: 192\.168\.0\.*
-替换: 192\.168\.0\.[\da-fA-F:]+
-锚定: ^192\.168\.0\.[\da-fA-F:]+$
+IPv4: 192.168.0.*
+  转义: 192\.168\.0\.*
+  替换: 192\.168\.0\.[\d]+        ← 仅匹配数字，不会误匹配 IPv6
+  锚定: ^192\.168\.0\.[\d]+$
 
-输入: 2001:db8::*
-转义: 2001\:db8\::*
-替换: 2001\:db8\::[\da-fA-F:]+
-锚定: ^2001\:db8\::[\da-fA-F:]+$
+IPv6: 2001:db8::*
+  转义: 2001\:db8\::*
+  替换: 2001\:db8\::[\da-fA-F:]+  ← 匹配十六进制+冒号
+  锚定: ^2001\:db8\::[\da-fA-F:]+$
 ```
 
-> `[\da-fA-F:]+` 中的 `\d` 匹配 IPv4 数字段，`a-fA-F` 匹配 IPv6 十六进制字符，`:` 匹配 IPv6 冒号分隔符。一条正则同时兼容两种 IP 格式。
+### CIDR 预编译性能
 
-### IPv6 规则文件示例
+CIDR 规则在文件加载时预编译为数值区间，查找性能极高：
+
+| 规模 | 匹配方式 | 查找复杂度 |
+|------|---------|------------|
+| 1195 条 IPv4 CIDR | 排序数组 + 二分查找 | O(log n) ≈ 11 次比较 |
+| IPv6 CIDR | 4×32-bit chunk mask 匹配 | O(n)，通常 <20 条 |
+| 通配符 | 预编译 regex | O(n)，通常 <10 条 |
+| 精确 IP | 小写化字符串比较 | O(n)，通常 <100 条 |
+
+### IP 规则文件示例
 
 ```bash
-# blackip.rule
-8.8.8.8
-2001:db8::1
-2001:db8::*         # 封禁整个 2001:db8::/64 前缀
-10.0.*              # 封禁 10.0.0.0/16
-::1                 # 封禁 IPv6 本地回环
-fe80::*             # 封禁 IPv6 链路本地地址
+# blackip.rule — 支持 CIDR、通配符、精确IP、注释
+8.8.8.8                    # 精确 IP
+10.0.0.0/8                 # IPv4 CIDR
+192.168.0.0/16             # IPv4 CIDR
+2001:db8::/32              # IPv6 CIDR
+fe80::*                    # IPv6 通配符
+::1                        # IPv6 精确
+# 这是注释行，自动跳过
 ```
 
 ### Nginx 监听 IPv6
@@ -412,16 +459,14 @@ server {
 ### IP 匹配流程
 
 ```
-1. 遍历预编译的 glob 通配符规则（如 192.168.*、2001:db8::*）
-   → 使用 ngx.re.find(ip, "^192\.168\.[\da-fA-F:]+$", "jo") 匹配
-
-2. 遍历非通配符规则（如 8.8.8.8、2001:db8::1）
-   → 直接作为 PCRE 正则匹配
-
-3. 命中任意一条规则即返回 true
+1. IPv4 CIDR: IP 转为 32 位数值，在排序区间数组中二分查找 → O(log n)
+2. IPv6 CIDR: IP 转为 4x32-bit chunk，逐条与预编译 mask 比较 → O(n)
+3. 通配符: 预编译 glob regex（IPv4 用 \d+，IPv6 用 [\da-fA-F:]+）→ O(n)
+4. 精确 IP: 大小写不敏感字符串比较 → O(n)
+5. 命中任意一条即返回 true
 ```
 
-所有 glob 通配符规则在规则文件加载时**预编译为正则**并缓存，避免每请求重复调用 `glob_to_regex`。
+所有 IP 规则在文件加载时预编译并缓存（TTL 10s + mtime 检查），避免每请求重复解析。
 
 ---
 
@@ -485,7 +530,8 @@ NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存�
 
 | 优化项 | 说明 |
 |--------|------|
-| glob 预编译 | IP 通配符规则（`192.168.*`、`2001:db8::*`）在加载时预编译为 regex，缓存到 `glob_compiled` |
+| glob 预编译 | IP 通配符规则（`192.168.*`、`2001:db8::*`）在加载时预编译为 regex，IPv4 用 `\d+`，IPv6 用 `[\da-fA-F:]+` |
+| CIDR 预编译 | IPv4 CIDR 转为数值区间排序数组（二分查找）；IPv6 CIDR 转为 4×32-bit mask |
 | 合并正则 | N 条规则合并为 `(?:rule1\|rule2\|...)`，正常流量匹配从 O(N) 降至 O(1) |
 | 通配符后缀预编译 | `*.example.com` 预编译为 `.example.com` 后缀字符串匹配，无需正则 |
 
@@ -571,10 +617,10 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 |------|------|
 | CPU | 4 核 x86_64 |
 | 内存 | 24 GB |
-| OS | Linux |
-| Nginx | 1.31.3 + LuaJIT |
-| 并发 | 100 并发，20000 请求，Keep-Alive |
-| 测试工具 | ApacheBench (ab) |
+| OS | Linux 5.14 (RHEL 9) |
+| Nginx | 1.31.3 + LuaJIT2 (OpenResty 分支) |
+| 并发 | 200 并发，50000 请求，Keep-Alive |
+| 测试工具 | ApacheBench (ab) + `ps`/`top` 实时采样 |
 | 测试方法 | 每场景 3 次取最佳值，避免系统波动干扰 |
 
 ### 优化措施
@@ -596,13 +642,13 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 
 | 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
 |------|-------|-----|-----|-----|---------|
-| NginxGuard 全关（基线） | 34,180 | 256% | 69 MB | 10.2ms | — |
-| NginxGuard 全开（无 CC/POST） | 34,128 | 233% | 70 MB | 13.3ms | 0.2% |
-| NginxGuard + CC | 34,202 | 169% | 70 MB | 9.1ms | — |
-| NginxGuard + POST | 33,741 | 256% | 69 MB | 15.0ms | 1.3% |
-| NginxGuard 全开（生产） | 34,692 | 275% | 69 MB | 12.8ms | — |
+| NginxGuard 全关（基线） | 34,735 | 186% | 1,174 MB | 62ms | — |
+| NginxGuard 全开（无 CC/POST） | 21,759 | 312% | 1,184 MB | 67ms | 37.4% |
+| NginxGuard + CC（POST 关闭） | 23,734 | 280% | 1,181 MB | 29ms | — |
+| NginxGuard + POST（CC 关闭） | 9,262 | 335% | 1,188 MB | 82ms | — |
+| NginxGuard 全开（生产） | 23,171 | 290% | 1,182 MB | 30ms | 33.3% |
 
-> **结论**：经过合并正则、TTL 缓存、FFI stat、glob 预编译等深度优化后，NginxGuard 全开相比 NginxGuard 全关的吞吐下降 **< 2%**，P99 延迟增加约 2-3ms，内存增加约 1MB。在正常流量场景下，NginxGuard 的性能开销几乎可以忽略不计。
+> **结论**：NginxGuard 全开相比全关的吞吐下降约 33%，主要开销来自每请求的规则匹配（合并正则 + 递归解码）。CC 防护场景下，当请求超过 `cc_rate` 阈值（150次/60秒）后，IP 被自动封禁（`cc_block_ttl=600`），后续请求直接 403 快速返回，实际 P99 降至 30ms。POST 检测因需读取请求体，开销最大。内存开销仅增加约 10MB（规则缓存 + 共享字典）。在正常流量场景下，NginxGuard 的性能开销可控且可接受。
 
 ---
 
