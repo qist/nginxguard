@@ -8,7 +8,8 @@
     },
 
     "api.example.com": {
-        "waf_enable": "off"
+        "_comment": "示例：如需对API域名关闭WAF，取消下面一行的注释。注意：关闭WAF将跳过所有安全检查",
+        "waf_enable": "on"
     },
 
     "*.test.com": {

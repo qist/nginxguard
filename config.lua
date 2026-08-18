@@ -3,12 +3,17 @@
 --waf status
 config_waf_enable = "on"
 --trust proxy forwarded headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)
---"on"  = NginxGuard behind CDN/reverse proxy, trust forwarded headers to get real client IP
---"off" = NginxGuard directly exposed to internet, only use remote_addr to prevent IP spoofing
---Default "off" for security: trusting forwarded headers lets clients spoof X-Forwarded-For to
---bypass IP black/white lists and evade CC auto-ban. Only set "on" when a trusted proxy/CDN is
---the direct upstream (and ensure it strips client-supplied XFF).
+--"on"  = trust forwarded headers to get real client IP (for CDN/reverse proxy deployment)
+--       + cdnip.rule exists  = only trust XFF from CDN IP list (secure, recommended)
+--       + cdnip.rule absent  = trust XFF from any source (original behavior, less secure)
+--"off" = only use remote_addr, never trust forwarded headers (direct internet exposure)
 config_trust_proxy_headers = "on"
+--CDN/trusted proxy IP list: place cdnip.rule in rule-config/ (same as blackip.rule etc.)
+--When trust_proxy_headers="on" and cdnip.rule exists:
+--  Only trust XFF/X-Real-IP when remote_addr matches an IP in cdnip.rule (prevents spoofing)
+--When cdnip.rule is absent: trusts XFF from any source (original behavior)
+--Supports: IPv4 CIDR (1.180.27.0/24), IPv6 CIDR (2001:db8::/32), wildcards (192.168.*), exact IPs
+--Hot-reloaded via mtime check, no restart needed.
 --log dir
 config_log_dir = "/apps/nginx/log/"
 --rule setting
@@ -33,9 +38,6 @@ config_cookie_check = "on"
 config_cc_check = "on"
 --cc rate the xxx of xxx seconds
 config_cc_rate = "150/60"
---cc counting granularity: "ip_uri" = per IP+URI (default, only blocks single-path flooding);
---                        "ip"      = per IP only (blocks whole-IP CC even with randomized paths)
-config_cc_mode = "ip_uri"
 --cc block ttl (seconds), auto-ban IP when CC triggered, 0=disable auto-ban
 config_cc_block_ttl = 600
 --enable/disable post filtering

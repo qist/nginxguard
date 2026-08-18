@@ -4,6 +4,7 @@ require 'config'
 --Module-level requires (avoid per-request lookup)
 local cjson = require("cjson")
 local io = require 'io'
+local bit = require("bit")  -- LuaJIT bit module, always available in OpenResty
 
 --Cache via ngx.shared.dict, fallback to direct read if not configured
 local rulematch = ngx.re.find
@@ -119,10 +120,95 @@ local function is_valid_ipv6(s)
     return true
 end
 
+--Forward declaration: is_cdn_ip is defined later (after get_rule_entry) but
+--get_client_ip (defined above) references it at runtime. This ensures the local binding.
+local is_cdn_ip
+
 --Validate IP address (IPv4 or IPv6)
 local function is_valid_ip(s)
     if s == nil or type(s) ~= "string" then return false end
     return is_valid_ipv4(s) or is_valid_ipv6(s)
+end
+
+--Convert IPv4 dotted-quad to 32-bit number (returns nil on invalid)
+local function ipv4_to_num(s)
+    local a, b, c, d = s:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    if not a then return nil end
+    a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+    if not (a and b and c and d) then return nil end
+    if a > 255 or b > 255 or c > 255 or d > 255 then return nil end
+    return a * 16777216 + b * 65536 + c * 256 + d
+end
+
+--Binary search: find if ip_num falls within any range in sorted list
+--ranges: sorted array of {lo=, hi=} ascending by lo
+local function binary_search_range(ranges, target)
+    local lo_idx, hi_idx = 1, #ranges
+    while lo_idx <= hi_idx do
+        local mid = bit.rshift(lo_idx + hi_idx, 1)
+        local r = ranges[mid]
+        if target < r.lo then
+            hi_idx = mid - 1
+        elseif target > r.hi then
+            lo_idx = mid + 1
+        else
+            return true
+        end
+    end
+    return false
+end
+
+--Expand IPv6 to 8 full hex groups (e.g. "2001:db8::1" → {"2001","0db8","0000",...,"0001"})
+--Returns array of 8 strings (each 1-4 hex digits), or nil on invalid
+local function ipv6_expand(s)
+    if s == nil or type(s) ~= "string" then return nil end
+    if not s:find(":") or s:match("[^%x:]") then return nil end
+    if #s > 39 then return nil end
+
+    local function split_colon(str)
+        local parts = {}
+        for p in str:gmatch("([^:]+)") do table.insert(parts, p) end
+        return parts
+    end
+
+    local groups
+    if s:find("::") then
+        local left_str, right_str = s:match("^(.-)::(.*)$")
+        if left_str == nil then return nil end
+        -- check for multiple ::
+        if right_str and right_str:find("::") then return nil end
+        local left_parts, right_parts = {}, {}
+        if left_str and left_str ~= "" then left_parts = split_colon(left_str) end
+        if right_str and right_str ~= "" then right_parts = split_colon(right_str) end
+        local total = #left_parts + #right_parts
+        if total > 7 then return nil end
+        local zeros = 8 - total
+        groups = {}
+        for _, p in ipairs(left_parts) do table.insert(groups, p) end
+        for _ = 1, zeros do table.insert(groups, "0") end
+        for _, p in ipairs(right_parts) do table.insert(groups, p) end
+    else
+        groups = split_colon(s)
+    end
+
+    if #groups ~= 8 then return nil end
+    for i, g in ipairs(groups) do
+        if #g > 4 or tonumber(g, 16) == nil then return nil end
+    end
+    return groups
+end
+
+--Convert IPv6 to 4 x 32-bit numbers (each fits in LuaJIT 32-bit bit ops)
+--groups 1-2 → chunk0, groups 3-4 → chunk1, groups 5-6 → chunk2, groups 7-8 → chunk3
+--Returns (c0, c1, c2, c3) or nil on invalid
+local function ipv6_to_chunks(s)
+    local g = ipv6_expand(s)
+    if g == nil then return nil end
+    local c0 = tonumber(g[1], 16) * 65536 + tonumber(g[2], 16)
+    local c1 = tonumber(g[3], 16) * 65536 + tonumber(g[4], 16)
+    local c2 = tonumber(g[5], 16) * 65536 + tonumber(g[6], 16)
+    local c3 = tonumber(g[7], 16) * 65536 + tonumber(g[8], 16)
+    return c0, c1, c2, c3
 end
 --IPv4: 192.168.0.* → ^192\.168\.0\.\d+$
 --IPv4: 192.168.*.1  → ^192\.168\.\d+\.1$
@@ -139,14 +225,22 @@ function glob_to_regex(pattern)
     end
     -- escape special regex chars except * (prepend backslash)
     local regex = string.gsub(pattern, "([%.%+%-%?%[%]%(%)%$%^])", "\\%1")
-    -- replace * with [\da-fA-F:]+ to match both IPv4 (digits) and IPv6 (hex + colon)
-    regex = string.gsub(regex, "%*", "[\\da-fA-F:]+")
+    -- Choose wildcard replacement based on IP type:
+    -- IPv4 pattern (contains . but no :) → \d+ (digits only, prevents matching IPv6)
+    -- IPv6 pattern (contains :) → [\da-fA-F:]+ (hex digits + colons)
+    if string.find(pattern, ":") then
+        regex = string.gsub(regex, "%*", "[\\da-fA-F:]+")
+    else
+        regex = string.gsub(regex, "%*", "[\\d]+")
+    end
     -- anchor full match
     return "^" .. regex .. "$"
 end
 
 --Get the client IP
 --When trust_proxy_headers="on": extract from X-Forwarded-For/X-Real-IP/CF-Connecting-IP
+--  - cdnip.rule exists  = only trust XFF when remote_addr is from a CDN IP (secure)
+--  - cdnip.rule absent  = trust XFF from any source (original behavior)
 --When trust_proxy_headers="off": only use remote_addr (prevent IP spoofing)
 --Supports per-domain override via domain.json
 function get_client_ip()
@@ -155,32 +249,39 @@ function get_client_ip()
     end
     local ip
     if get_effective_config("trust_proxy_headers") ~= "off" then
-        local headers = ngx.req.get_headers()
-        -- 1. CF-Connecting-IP (Cloudflare specific, most reliable)
-        ip = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
-        if ip ~= nil and not is_valid_ip(ip) then ip = nil end
-        -- 2. X-Real-IP
-        if ip == nil then
-            ip = headers["X_real_ip"] or headers["X-Real-IP"]
+        -- Security check: only trust forwarded headers if the direct connection
+        -- comes from a trusted CDN/proxy IP (prevents direct XFF spoofing)
+        -- is_cdn_ip returns nil when cdnip.rule doesn't exist (= trust all, original behavior)
+        -- is_cdn_ip returns false when remote_addr is not in cdnip.rule (= do NOT trust XFF)
+        local remote = ngx.var.remote_addr
+        if is_cdn_ip(remote) ~= false then
+            local headers = ngx.req.get_headers()
+            -- 1. CF-Connecting-IP (Cloudflare specific, most reliable)
+            ip = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
             if ip ~= nil and not is_valid_ip(ip) then ip = nil end
-        end
-        -- 3. X-Forwarded-For (take first valid IP if multiple)
-        if ip == nil then
-            local xff = headers["X_Forwarded_For"] or headers["X-Forwarded-For"]
-            if xff then
-                -- extract first valid IP: "103.119.132.48, 162.158.179.193" -> "103.119.132.48"
-                -- strictly validate IP format to prevent spoofing with fake hostnames
-                for entry in xff:gmatch("([^,]+)") do
-                    local candidate = entry:match("^%s*(%S+)%s*$")
-                    if candidate and is_valid_ip(candidate) then
-                        ip = candidate
-                        break
+            -- 2. X-Real-IP
+            if ip == nil then
+                ip = headers["X_real_ip"] or headers["X-Real-IP"]
+                if ip ~= nil and not is_valid_ip(ip) then ip = nil end
+            end
+            -- 3. X-Forwarded-For (take first valid IP if multiple)
+            if ip == nil then
+                local xff = headers["X_Forwarded_For"] or headers["X-Forwarded-For"]
+                if xff then
+                    -- extract first valid IP: "103.119.132.48, 162.158.179.193" -> "103.119.132.48"
+                    -- strictly validate IP format to prevent spoofing with fake hostnames
+                    for entry in xff:gmatch("([^,]+)") do
+                        local candidate = entry:match("^%s*(%S+)%s*$")
+                        if candidate and is_valid_ip(candidate) then
+                            ip = candidate
+                            break
+                        end
                     end
                 end
             end
         end
     end
-    -- 4. remote_addr (always available, or fallback when headers not trusted)
+    -- 4. remote_addr (always available, or fallback when headers not trusted or not from CDN)
     if ip == nil then
         ip = ngx.var.remote_addr
     end
@@ -389,10 +490,15 @@ local function read_rule_file(filepath)
 
     -- Build combined alternation pattern for fast matching
     -- (?:rule1|rule2|rule3|...) — 1 regex match instead of N
+    -- Skip for cdnip.rule: CIDR entries are pre-compiled by load_cdnip_cache,
+    -- building a combined regex from CIDR strings (e.g. 1.180.27.0/24) is useless and wasteful
+    local is_cdnip = filepath:match("cdnip%.rule$")
     local parts = {}
-    for _, r in ipairs(t) do
-        if r ~= "" then
-            table.insert(parts, r)
+    if not is_cdnip then
+        for _, r in ipairs(t) do
+            if r ~= "" then
+                table.insert(parts, r)
+            end
         end
     end
     local combined = nil
@@ -401,11 +507,13 @@ local function read_rule_file(filepath)
     end
 
     -- Pre-compile glob patterns (for IP rules like 192.168.*)
-    -- Store compiled regexes so we don't call glob_to_regex per request
+    -- Skip for cdnip.rule: handled by load_cdnip_cache
     local glob_compiled = {}
-    for _, r in ipairs(t) do
-        if r ~= "" and string.find(r, "%*") then
-            table.insert(glob_compiled, glob_to_regex(r))
+    if not is_cdnip then
+        for _, r in ipairs(t) do
+            if r ~= "" and string.find(r, "%*") then
+                table.insert(glob_compiled, glob_to_regex(r))
+            end
         end
     end
 
@@ -461,28 +569,182 @@ function get_rule_entry(rulefilename)
     return worker_rule_cache[filepath]
 end
 
---Match IP against a rule file (uses pre-compiled glob patterns)
---Returns true if IP matches any rule, nil otherwise
-function match_ip_rule(rulefilename, ip)
+--===========================================================================
+--Unified IP rule matching: CIDR + wildcard + exact IP for all *.rule files
+--Used by blackip.rule, whiteip.rule, cdnip.rule — all support same formats
+--===========================================================================
+
+--Worker-level cache for compiled IP rules
+--key: filepath → { ipv4_ranges=, ipv6_list=, glob_list=, exact_list=, mtime= }
+local worker_ip_cache = {}
+
+--Compile IP rule lines into pre-compiled CIDR ranges, glob regexes, exact IPs
+--Skips comment lines (#) and empty lines
+--Returns: { ipv4_ranges=sorted, ipv6_list=, glob_list=, exact_list= }
+local function compile_ip_rules(rules)
+    local ipv4_ranges = {}
+    local ipv6_list = {}
+    local glob_list = {}
+    local exact_list = {}
+
+    for _, line in ipairs(rules) do
+        if line ~= "" and not line:match("^#") then
+            if line:find("/") then
+                -- CIDR notation (IPv4 or IPv6)
+                local cidr_ip, prefix_str = line:match("^([%d%.:%x]+)/(%d+)$")
+                if cidr_ip and prefix_str then
+                    local prefix = tonumber(prefix_str)
+                    if cidr_ip:find(":") then
+                        -- IPv6 CIDR
+                        local c0, c1, c2, c3 = ipv6_to_chunks(cidr_ip)
+                        if c0 and prefix <= 128 then
+                            local m0, m1, m2, m3 = 0, 0, 0, 0
+                            if prefix >= 32 then
+                                m0 = 0xFFFFFFFF
+                                if prefix >= 64 then
+                                    m1 = 0xFFFFFFFF
+                                    if prefix >= 96 then
+                                        m2 = 0xFFFFFFFF
+                                        if prefix == 128 then
+                                            m3 = 0xFFFFFFFF
+                                        elseif prefix > 96 then
+                                            m3 = bit.lshift(0xFFFFFFFF, 128 - prefix)
+                                        end
+                                    elseif prefix > 64 then
+                                        m2 = bit.lshift(0xFFFFFFFF, 96 - prefix)
+                                    end
+                                elseif prefix > 32 then
+                                    m1 = bit.lshift(0xFFFFFFFF, 64 - prefix)
+                                end
+                            elseif prefix > 0 then
+                                m0 = bit.lshift(0xFFFFFFFF, 32 - prefix)
+                            end
+                            table.insert(ipv6_list, {
+                                c0 = bit.band(c0, m0), c1 = bit.band(c1, m1),
+                                c2 = bit.band(c2, m2), c3 = bit.band(c3, m3),
+                                m0 = m0, m1 = m1, m2 = m2, m3 = m3
+                            })
+                        end
+                    else
+                        -- IPv4 CIDR
+                        local base = ipv4_to_num(cidr_ip)
+                        if base and prefix <= 32 then
+                            local mask
+                            if prefix == 0 then
+                                mask = 0
+                            elseif prefix == 32 then
+                                mask = 0xFFFFFFFF
+                            else
+                                mask = bit.lshift(0xFFFFFFFF, 32 - prefix)
+                            end
+                            local range_lo = bit.band(base, mask)
+                            local range_hi = bit.bor(range_lo, bit.bnot(mask))
+                            range_hi = bit.band(range_hi, 0xFFFFFFFF)
+                            table.insert(ipv4_ranges, {lo = range_lo, hi = range_hi})
+                        end
+                    end
+                end
+            elseif line:find("%*") then
+                -- Wildcard pattern (e.g. 192.168.*)
+                table.insert(glob_list, glob_to_regex(line))
+            else
+                -- Exact IP (normalize to lowercase for case-insensitive IPv6 matching)
+                table.insert(exact_list, string.lower(line))
+            end
+        end
+    end
+
+    -- Sort IPv4 ranges by lo for binary search
+    table.sort(ipv4_ranges, function(a, b) return a.lo < b.lo end)
+
+    return {
+        ipv4_ranges = ipv4_ranges,
+        ipv6_list = ipv6_list,
+        glob_list = glob_list,
+        exact_list = exact_list,
+    }
+end
+
+--Get compiled IP rule cache for a rule file (TTL-based, recompiles on mtime change)
+--Returns compiled table or nil if file doesn't exist
+local function get_compiled_ip_rules(rulefilename)
     local entry = get_rule_entry(rulefilename)
     if entry == nil then return nil end
-    -- Check pre-compiled glob patterns (wildcard IPs like 192.168.*)
-    if entry.glob_compiled then
-        for _, gregex in ipairs(entry.glob_compiled) do
-            if rulematch(ip, gregex, "jo") then
-                return true
+
+    local cache = worker_ip_cache[rulefilename]
+    if cache and cache.mtime == entry.mtime then
+        return cache
+    end
+
+    -- recompile
+    local compiled = compile_ip_rules(entry.rules)
+    compiled.mtime = entry.mtime
+    worker_ip_cache[rulefilename] = compiled
+    return compiled
+end
+
+--Match an IP against compiled IP rules (CIDR + wildcard + exact)
+--Returns true if match, false if no match, nil if rule file doesn't exist
+local function match_compiled_ip(compiled, ip)
+    if compiled == nil or ip == nil then return nil end
+    local ip_lower = string.lower(ip)
+
+    -- IPv4: binary search on pre-compiled sorted ranges
+    if is_valid_ipv4(ip) then
+        local num = ipv4_to_num(ip)
+        if num and binary_search_range(compiled.ipv4_ranges, num) then
+            return true
+        end
+    elseif is_valid_ipv6(ip) then
+        -- IPv6: check against all pre-compiled CIDR entries
+        local c0, c1, c2, c3 = ipv6_to_chunks(ip)
+        if c0 then
+            for _, r in ipairs(compiled.ipv6_list) do
+                if bit.band(c0, r.m0) == r.c0 and bit.band(c1, r.m1) == r.c1
+                   and bit.band(c2, r.m2) == r.c2 and bit.band(c3, r.m3) == r.c3 then
+                    return true
+                end
             end
         end
     end
-    -- Check non-glob rules (exact IPs like 8.8.8.8, or regex)
-    for _, rule in ipairs(entry.rules) do
-        if rule ~= "" and not string.find(rule, "%*") then
-            if rulematch(ip, rule, "jo") then
-                return true
-            end
+
+    -- Check glob patterns (wildcards like 192.168.*)
+    for _, gregex in ipairs(compiled.glob_list) do
+        if rulematch(ip, gregex, "jo") then
+            return true
         end
     end
-    return nil
+
+    -- Check exact IPs (case-insensitive via lowercase normalization)
+    for _, ex in ipairs(compiled.exact_list) do
+        if ip_lower == ex then
+            return true
+        end
+    end
+
+    return false
+end
+
+--Match IP against a rule file (supports CIDR, wildcards, exact IPs, comments)
+--Returns true if IP matches, nil if rule file doesn't exist or no match
+function match_ip_rule(rulefilename, ip)
+    local compiled = get_compiled_ip_rules(rulefilename)
+    if compiled == nil then return nil end
+    return match_compiled_ip(compiled, ip) or nil
+end
+
+--===========================================================================
+--Unified IP rule matching: CIDR + wildcard + exact IP for all *.rule files
+--Returns: true  = IP is in CDN list (trust XFF)
+--         false = IP is NOT in CDN list (do NOT trust XFF)
+--         nil   = cdnip.rule doesn't exist (trust XFF from any source, original behavior)
+is_cdn_ip = function(ip)
+    if ip == nil then return nil end
+    local compiled = get_compiled_ip_rules("cdnip.rule")
+    if compiled == nil then
+        return nil  -- cdnip.rule doesn't exist = trust all (original behavior)
+    end
+    return match_compiled_ip(compiled, ip)
 end
 
 --Get NginxGuard rule (returns rules array only, for backward compat)

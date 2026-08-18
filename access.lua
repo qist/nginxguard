@@ -7,12 +7,14 @@ local rulematch = ngx.re.find
 local unescape = ngx.unescape_uri
 local io = require 'io'
 
---Recursive URL-decode: decode up to 5 layers to catch multi-encoded attacks
+--Recursive URL-decode: decode up to 8 layers to catch multi-encoded attacks
 --e.g. %2525253Cscript -> %25253Cscript -> %253Cscript -> %3Cscript -> <script
+--8 layers covers all known attack tools (Burp, SQLmap use max 3-4 layers)
+--Each layer has early-exit (decoded == prev) so normal traffic pays zero overhead
 local function recursive_unescape(s)
     if s == nil then return s end
     local prev = s
-    for _ = 1, 5 do
+    for _ = 1, 8 do
         local decoded = unescape(prev)
         if decoded == prev then break end  -- stable, no more changes
         prev = decoded
@@ -20,10 +22,23 @@ local function recursive_unescape(s)
     return prev
 end
 
---Decode JS-style unicode/hex escapes: \u003c -> <, \x3c -> <
---These are commonly used in JSON payloads to bypass XSS filters
+--Decode JS-style unicode/hex escapes and HTML entities:
+--  \uXXXX    → character (JS/JSON, 4 hex digits)
+--  \u{XXXX}  → character (ES6, variable hex digits, e.g. \u{1f4a9})
+--  \xXX      → character (JS, 2 hex digits)
+--  &#xNN;    → character (HTML hex entity)
+--  &#NN;     → character (HTML decimal entity)
+--These are commonly used in JSON/XSS payloads to bypass WAF filters
 local function decode_js_unicode(s)
     if s == nil then return s end
+    -- \u{XXXX} (ES6 unicode code point, variable hex digits)
+    s = ngx.re.gsub(s, [[\\u\{([0-9a-fA-F]{1,6})\}]], function(m)
+        local code = tonumber(m[1], 16)
+        if code and code >= 32 and code <= 126 then
+            return string.char(code)
+        end
+        return m[0]
+    end, "jo")
     -- \uXXXX (4 hex digits)
     s = ngx.re.gsub(s, [[\\u([0-9a-fA-F]{4})]], function(m)
         local code = tonumber(m[1], 16)
@@ -40,6 +55,22 @@ local function decode_js_unicode(s)
         end
         return m[0]
     end, "jo")
+    -- &#xNN; (HTML hex entity, e.g. &#x3c; → <)
+    s = ngx.re.gsub(s, [[&#x([0-9a-fA-F]{2,4});]], function(m)
+        local code = tonumber(m[1], 16)
+        if code and code >= 32 and code <= 126 then
+            return string.char(code)
+        end
+        return m[0]
+    end, "joi")
+    -- &#NN; (HTML decimal entity, e.g. &#60; → <)
+    s = ngx.re.gsub(s, [[&#(\d{2,3});]], function(m)
+        local code = tonumber(m[1])
+        if code and code >= 32 and code <= 126 then
+            return string.char(code)
+        end
+        return m[0]
+    end, "joi")
     return s
 end
 
@@ -127,17 +158,7 @@ local worker_cc_rate_last_sync = 0
 
 local function cc_attack_check()
     if get_effective_config("cc_check") == "on" then
-        local ATTACK_URI = ngx.var.uri
-        -- CC counting granularity:
-        --   "ip"     -> count per client IP only (blocks whole-IP CC even with randomized paths)
-        --   "ip_uri" -> count per IP+URI (original behavior; only blocks single-path flooding)
-        local cc_mode = get_effective_config("cc_mode") or "ip_uri"
-        local CC_TOKEN
-        if cc_mode == "ip" then
-            CC_TOKEN = "cc:" .. get_client_ip()
-        else
-            CC_TOKEN = "cc:" .. get_client_ip() .. ATTACK_URI
-        end
+        local CC_TOKEN = "cc:" .. get_client_ip()
         local limit = ngx.shared.limit
         if limit == nil then return false end
 
@@ -545,8 +566,12 @@ local function post_attack_check()
                         local data = prev_tail .. chunk
                         -- recursive decode per chunk (catches multi-encoded attacks)
                         local decoded = recursive_unescape(data)
-
+                        -- also decode JS unicode escapes for JSON payloads
+                        local js_decoded = decode_js_unicode(decoded)
                         local matched = match_any_rule('post.rule', decoded, "joi")
+                        if not matched and js_decoded ~= decoded then
+                            matched = match_any_rule('post.rule', js_decoded, "joi")
+                        end
                         if matched then
                             log_record('Deny_URL_POST', ngx.var.request_uri, "-", matched)
                             f:close()
