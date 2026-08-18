@@ -35,7 +35,7 @@ java\.lang
 \/jmx-console\/
 \/struts\/
 \/struts2
-\/rest\/
+(?i:\/rest\/).*\.(php|jsp|asp|aspx|do|action|jspx|jspf)$
 \/actuator\/
 \/actuator\/env
 \/actuator\/health
@@ -100,8 +100,8 @@ java\.lang
 ^\/node_modules\/
 ^\/coverage\/
 ^\/debug\/pprof
-^\/metrics$
-^\/healthz$
+^\/metrics\?
+^\/healthz\?
 \/.svn\/entries
 \/.svn\/wc\.db
 \/CVS\/
@@ -223,12 +223,11 @@ java\.lang
 \/htaccess
 \/htpasswd
 \/crossdomain\.xml
-\/clientaccesspolicy\.xml
 \/web\.xml
 \/WEB-INF/web\.xml
 \/META-INF/MANIFEST\.MF
-^\/readyz$
-^\/livez$
+^\/readyz\?
+^\/livez\?
 ^\/debug\/vars
 ^\/debug\/requests
 ^\/debug\/events

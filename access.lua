@@ -75,7 +75,7 @@ end
 local function white_url_check()
     if get_effective_config("white_url_check") == "on" then
         local REQ_URI = ngx.var.request_uri
-        if match_any_rule('whiteurl.rule', REQ_URI, "jo") then
+        if match_any_rule('whiteurl.rule', REQ_URI, "joi") then
             return true
         end
     end
@@ -103,7 +103,16 @@ local worker_cc_rate_str = nil
 local function cc_attack_check()
     if get_effective_config("cc_check") == "on" then
         local ATTACK_URI = ngx.var.uri
-        local CC_TOKEN = get_client_ip() .. ATTACK_URI
+        -- CC counting granularity:
+        --   "ip"     -> count per client IP only (blocks whole-IP CC even with randomized paths)
+        --   "ip_uri" -> count per IP+URI (original behavior; only blocks single-path flooding)
+        local cc_mode = get_effective_config("cc_mode") or "ip_uri"
+        local CC_TOKEN
+        if cc_mode == "ip" then
+            CC_TOKEN = "cc:" .. get_client_ip()
+        else
+            CC_TOKEN = "cc:" .. get_client_ip() .. ATTACK_URI
+        end
         local limit = ngx.shared.limit
         if limit == nil then return false end
 
@@ -486,8 +495,8 @@ local function waf_main()
         return
     end
     if white_ip_check() then
-    elseif white_url_check() then
     elseif dynamic_black_ip_check() then
+    elseif white_url_check() then
     elseif black_ip_check() then
     elseif user_agent_attack_check() then
     elseif referer_check() then

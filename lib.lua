@@ -6,7 +6,6 @@ local cjson = require("cjson")
 local io = require 'io'
 
 --Cache via ngx.shared.dict, fallback to direct read if not configured
-local waf_cache = ngx.shared.waf_cache
 local rulematch = ngx.re.find
 
 --File modification time detection
@@ -454,17 +453,35 @@ function match_any_rule(rulefilename, input, flags)
     local entry = get_rule_entry(rulefilename)
     if entry == nil then return nil end
     -- Fast path: single combined regex match (covers 99%+ of normal traffic)
-    if entry.combined == nil then return nil end
-    if not rulematch(input, entry.combined, flags) then
-        return nil
+    if entry.combined ~= nil then
+        -- Use multi-return form to detect regex compile errors.
+        -- ngx.re.find returns (from, to, err); on compile error from=nil and err is set.
+        -- A compile error must NOT be treated as "no match" (fail-open); fall back to
+        -- per-rule matching so a single bad rule does not silently disable the whole file.
+        local from, _, err = rulematch(input, entry.combined, flags)
+        if err then
+            ngx.log(ngx.ERR, "[NginxGuard] rule file '", rulefilename,
+                    "' combined regex compile/exec error: ", err,
+                    " — falling back to per-rule matching")
+        elseif from then
+            -- Slow path (attack detected): find which specific rule matched for logging
+            for _, rule in ipairs(entry.rules) do
+                if rule ~= "" and rulematch(input, rule, flags) then
+                    return rule
+                end
+            end
+            return ""  -- combined matched but individual didn't (edge case)
+        else
+            return nil  -- genuine no-match, fast path clean
+        end
     end
-    -- Slow path (attack detected): find which specific rule matched for logging
+    -- Fallback: per-rule matching (also used when combined is nil or errored above)
     for _, rule in ipairs(entry.rules) do
         if rule ~= "" and rulematch(input, rule, flags) then
             return rule
         end
     end
-    return ""  -- combined matched but individual didn't (edge case)
+    return nil
 end
 
 --NginxGuard log: synchronous write (attack logs must not be lost)

@@ -29,7 +29,10 @@ config_cookie_check = "on"
 --enable/disable cc filtering
 config_cc_check = "on"
 --cc rate the xxx of xxx seconds
-config_cc_rate = "60/60"
+config_cc_rate = "150/60"
+--cc counting granularity: "ip_uri" = per IP+URI (default, only blocks single-path flooding);
+--                        "ip"      = per IP only (blocks whole-IP CC even with randomized paths)
+config_cc_mode = "ip_uri"
 --cc block ttl (seconds), auto-ban IP when CC triggered, 0=disable auto-ban
 config_cc_block_ttl = 600
 --enable/disable post filtering
