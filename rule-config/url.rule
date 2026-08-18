@@ -205,7 +205,7 @@ java\.lang
 \/whm
 \/plesk
 \/console/
-\/dashboard/
+^\/dashboard\/
 \/controlpanel
 \/wp-config
 \/wp-content\/backup
