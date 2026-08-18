@@ -128,7 +128,6 @@ java\.lang
 ^\/storage\/
 \/artisan
 \/server\.php
-\/clientaccesspolicy\.xml
 \/\.env\.example
 \/\.env\.development
 \/\.env\.testing

@@ -86,7 +86,44 @@ end
 --60s when using file-size fallback (forces periodic re-read)
 local cache_ttl = mtime_reliable and 0 or 60
 
---Convert glob-style wildcard pattern to regex
+--Validate IPv4 address: returns true if valid dotted-quad
+local function is_valid_ipv4(s)
+    if s == nil then return false end
+    local a, b, c, d = s:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    if not a then return false end
+    a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+    return a and b and c and d
+        and a >= 0 and a <= 255
+        and b >= 0 and b <= 255
+        and c >= 0 and c <= 255
+        and d >= 0 and d <= 255
+end
+
+--Validate IPv6 address: basic check for hex groups separated by colons
+local function is_valid_ipv6(s)
+    if s == nil then return false end
+    -- must contain at least one colon, only hex digits and colons
+    if not s:find(":") then return false end
+    if s:match("[^%x:]") then return false end
+    -- check length: max 39 chars (8 groups of 4 hex + 7 colons)
+    if #s > 39 then return false end
+    -- check groups: split by colon
+    local groups = {}
+    for g in s:gmatch("([^:]+)") do
+        if #g > 4 then return false end
+        table.insert(groups, g)
+    end
+    -- must have at least 3 groups (shortest: ::1)
+    if #groups < 2 and s:find("::") then return false end
+    if #groups < 3 and not s:find("::") then return false end
+    return true
+end
+
+--Validate IP address (IPv4 or IPv6)
+local function is_valid_ip(s)
+    if s == nil or type(s) ~= "string" then return false end
+    return is_valid_ipv4(s) or is_valid_ipv6(s)
+end
 --IPv4: 192.168.0.* → ^192\.168\.0\.\d+$
 --IPv4: 192.168.*.1  → ^192\.168\.\d+\.1$
 --IPv6: 2001:db8::*  → ^2001\:db8\::[\da-fA-F:]+$
@@ -121,16 +158,25 @@ function get_client_ip()
         local headers = ngx.req.get_headers()
         -- 1. CF-Connecting-IP (Cloudflare specific, most reliable)
         ip = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
+        if ip ~= nil and not is_valid_ip(ip) then ip = nil end
         -- 2. X-Real-IP
         if ip == nil then
             ip = headers["X_real_ip"] or headers["X-Real-IP"]
+            if ip ~= nil and not is_valid_ip(ip) then ip = nil end
         end
-        -- 3. X-Forwarded-For (take first IP if multiple)
+        -- 3. X-Forwarded-For (take first valid IP if multiple)
         if ip == nil then
             local xff = headers["X_Forwarded_For"] or headers["X-Forwarded-For"]
             if xff then
-                -- extract first IP: "103.119.132.48, 162.158.179.193" → "103.119.132.48"
-                ip = string.match(xff, "^%s*([%d%.:%a]+)")
+                -- extract first valid IP: "103.119.132.48, 162.158.179.193" -> "103.119.132.48"
+                -- strictly validate IP format to prevent spoofing with fake hostnames
+                for entry in xff:gmatch("([^,]+)") do
+                    local candidate = entry:match("^%s*(%S+)%s*$")
+                    if candidate and is_valid_ip(candidate) then
+                        ip = candidate
+                        break
+                    end
+                end
             end
         end
     end
@@ -510,15 +556,33 @@ function log_record(method,url,data,ruletag)
     local LOG_NAME = LOG_PATH..'/'..ngx.today().."_waf.log"
 
     -- log rotation: check file size only every 60s (not per attack)
+    -- use shared dict as cross-worker lock to prevent concurrent rotation
     local now = ngx.time()
     if now - log_last_rotation_time > 60 then
         log_last_rotation_time = now
-        local f_check = io.open(LOG_NAME, "r")
-        if f_check then
-            local file_size = f_check:seek("end")
-            f_check:close()
-            if file_size > 104857600 then  -- 100MB
-                os.rename(LOG_NAME, LOG_NAME .. ".old")
+        -- acquire cross-worker lock via shared dict (TTL=10s to prevent stale lock)
+        local waf_lock = ngx.shared.badGuys
+        local lock_key = "log_rotation_lock"
+        local acquired = false
+        if waf_lock then
+            local res, err = waf_lock:add(lock_key, 1, 10)
+            if res then
+                acquired = true
+            end
+        else
+            acquired = true  -- no shared dict, proceed without lock
+        end
+        if acquired then
+            local f_check = io.open(LOG_NAME, "r")
+            if f_check then
+                local file_size = f_check:seek("end")
+                f_check:close()
+                if file_size > 104857600 then  -- 100MB
+                    os.rename(LOG_NAME, LOG_NAME .. ".old")
+                end
+            end
+            if waf_lock then
+                waf_lock:delete(lock_key)
             end
         end
     end

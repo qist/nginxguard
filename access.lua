@@ -7,17 +7,40 @@ local rulematch = ngx.re.find
 local unescape = ngx.unescape_uri
 local io = require 'io'
 
---Recursive URL-decode: decode up to 3 layers to catch multi-encoded attacks
---e.g. %25253Cscript -> %253Cscript -> %3Cscript -> <script
+--Recursive URL-decode: decode up to 5 layers to catch multi-encoded attacks
+--e.g. %2525253Cscript -> %25253Cscript -> %253Cscript -> %3Cscript -> <script
 local function recursive_unescape(s)
     if s == nil then return s end
     local prev = s
-    for _ = 1, 3 do
+    for _ = 1, 5 do
         local decoded = unescape(prev)
         if decoded == prev then break end  -- stable, no more changes
         prev = decoded
     end
     return prev
+end
+
+--Decode JS-style unicode/hex escapes: \u003c -> <, \x3c -> <
+--These are commonly used in JSON payloads to bypass XSS filters
+local function decode_js_unicode(s)
+    if s == nil then return s end
+    -- \uXXXX (4 hex digits)
+    s = ngx.re.gsub(s, [[\\u([0-9a-fA-F]{4})]], function(m)
+        local code = tonumber(m[1], 16)
+        if code and code >= 32 and code <= 126 then
+            return string.char(code)
+        end
+        return m[0]
+    end, "jo")
+    -- \xXX (2 hex digits)
+    s = ngx.re.gsub(s, [[\\x([0-9a-fA-F]{2})]], function(m)
+        local code = tonumber(m[1], 16)
+        if code and code >= 32 and code <= 126 then
+            return string.char(code)
+        end
+        return m[0]
+    end, "jo")
+    return s
 end
 
 --Per-request cached waf_enable (avoids ~13 redundant get_effective_config calls)
@@ -95,10 +118,12 @@ local function is_white_ua()
 end
 
 --deny cc attack (sliding window via incr + TTL)
---Worker-level cc_rate cache (avoids per-request string.match)
+--Worker-level cc_rate cache with shared dict fallback for cross-worker consistency
 local worker_cc_count = nil
 local worker_cc_seconds = nil
 local worker_cc_rate_str = nil
+local CC_RATE_CACHE_TTL = 30  -- re-check shared dict every 30s
+local worker_cc_rate_last_sync = 0
 
 local function cc_attack_check()
     if get_effective_config("cc_check") == "on" then
@@ -116,12 +141,35 @@ local function cc_attack_check()
         local limit = ngx.shared.limit
         if limit == nil then return false end
 
-        -- Parse cc_rate once per worker, cache result
+        -- Parse cc_rate: worker-level cache + periodic shared dict sync
+        -- This ensures all workers use the same cc_rate within 30s of config change
         local cc_rate = get_effective_config("cc_rate")
-        if cc_rate ~= worker_cc_rate_str then
-            worker_cc_rate_str = cc_rate
-            worker_cc_count = tonumber(string.match(cc_rate, '^(%d+)/'))
-            worker_cc_seconds = tonumber(string.match(cc_rate, '/(%d+)$'))
+        local now = ngx.time()
+        if cc_rate ~= worker_cc_rate_str or (now - worker_cc_rate_last_sync) > CC_RATE_CACHE_TTL then
+            -- check shared dict for cross-worker consistent cc_rate
+            local shared_count = limit:get("cc_rate_count")
+            local shared_seconds = limit:get("cc_rate_seconds")
+            local shared_rate_str = limit:get("cc_rate_str")
+            if shared_rate_str == cc_rate and shared_count and shared_seconds then
+                -- shared dict is up-to-date, use it
+                worker_cc_count = shared_count
+                worker_cc_seconds = shared_seconds
+                worker_cc_rate_str = cc_rate
+                worker_cc_rate_last_sync = now
+            else
+                -- shared dict is stale or different, update it
+                local parsed_count = tonumber(string.match(cc_rate, '^(%d+)/'))
+                local parsed_seconds = tonumber(string.match(cc_rate, '/(%d+)$'))
+                if parsed_count and parsed_seconds then
+                    limit:set("cc_rate_count", parsed_count, 300)  -- 5 min TTL
+                    limit:set("cc_rate_seconds", parsed_seconds, 300)
+                    limit:set("cc_rate_str", cc_rate, 300)
+                end
+                worker_cc_count = parsed_count
+                worker_cc_seconds = parsed_seconds
+                worker_cc_rate_str = cc_rate
+                worker_cc_rate_last_sync = now
+            end
         end
         local CCcount = worker_cc_count
         local CCseconds = worker_cc_seconds
@@ -210,6 +258,19 @@ local function url_args_attack_check()
             return false
         end
         for key, val in pairs(REQ_ARGS) do
+            -- check parameter name (key) for injection
+            if key and type(key) == "string" and #key > 0 then
+                local decoded_key = recursive_unescape(key)
+                local matched = match_any_rule('args.rule', decoded_key, "joi")
+                if matched then
+                    log_record('Deny_URL_Args',ngx.var.request_uri,"key:"..key,matched)
+                    if is_waf_enabled() == "on" then
+                        waf_output()
+                        return true
+                    end
+                end
+            end
+            -- check parameter value
             local ARGS_DATA
             if type(val) == 'table' then
                 ARGS_DATA = table.concat(val, " ")
@@ -217,7 +278,8 @@ local function url_args_attack_check()
                 ARGS_DATA = val
             end
             if ARGS_DATA and type(ARGS_DATA) ~= "boolean" then
-                local matched = match_any_rule('args.rule', recursive_unescape(ARGS_DATA), "joi")
+                local decoded_val = recursive_unescape(ARGS_DATA)
+                local matched = match_any_rule('args.rule', decoded_val, "joi")
                 if matched then
                     log_record('Deny_URL_Args',ngx.var.request_uri,"-",matched)
                     if is_waf_enabled() == "on" then
@@ -384,9 +446,10 @@ end
 --deny post (form + JSON body)
 local function post_attack_check()
     if get_effective_config("post_check") == "on" then
-        -- skip non-POST/PUT requests (fix HTTP/2 GET 500 error)
+        -- skip body-less methods (GET/HEAD/OPTIONS/DELETE have no body by spec)
+        -- but allow POST/PUT/PATCH/MERGE/REPORT etc. that carry body
         local METHOD = ngx.req.get_method()
-        if METHOD ~= "POST" and METHOD ~= "PUT" and METHOD ~= "PATCH" then
+        if METHOD == "GET" or METHOD == "HEAD" or METHOD == "OPTIONS" or METHOD == "DELETE" then
             return false
         end
 
@@ -400,6 +463,19 @@ local function post_attack_check()
         local ok2, POST_ARGS = pcall(ngx.req.get_post_args)
         if ok2 and POST_ARGS ~= nil then
             for key, val in pairs(POST_ARGS) do
+                -- check parameter name (key) for injection
+                if key and type(key) == "string" and #key > 0 then
+                    local decoded_key = recursive_unescape(key)
+                    local matched_key = match_any_rule('post.rule', decoded_key, "joi")
+                    if matched_key then
+                        log_record('Deny_URL_POST', ngx.var.request_uri, "key:"..key, matched_key)
+                        if is_waf_enabled() == "on" then
+                            waf_output()
+                            return true
+                        end
+                    end
+                end
+                -- check parameter value
                 local POST_DATA
                 if type(val) == 'table' then
                     POST_DATA = table.concat(val, " ")
@@ -408,7 +484,12 @@ local function post_attack_check()
                 end
                 if POST_DATA and type(POST_DATA) ~= "boolean" then
                     local decoded_post = recursive_unescape(POST_DATA)
+                    -- also decode JS unicode escapes for JSON payloads
+                    local js_decoded = decode_js_unicode(decoded_post)
                     local matched = match_any_rule('post.rule', decoded_post, "joi")
+                    if not matched and js_decoded ~= decoded_post then
+                        matched = match_any_rule('post.rule', js_decoded, "joi")
+                    end
                     if matched then
                         log_record('Deny_URL_POST', ngx.var.request_body, "-", matched)
                         if is_waf_enabled() == "on" then
@@ -471,7 +552,12 @@ local function post_attack_check()
         if body and #body > 0 then
             -- recursive decode (catches multi-encoded attacks)
             local decoded_body = recursive_unescape(body)
+            -- also decode JS unicode escapes for JSON payloads
+            local js_decoded = decode_js_unicode(decoded_body)
             local matched = match_any_rule('post.rule', decoded_body, "joi")
+            if not matched and js_decoded ~= decoded_body then
+                matched = match_any_rule('post.rule', js_decoded, "joi")
+            end
             if matched then
                 log_record('Deny_URL_POST', ngx.var.request_uri, "-", matched)
                 if is_waf_enabled() == "on" then
@@ -495,18 +581,40 @@ local function waf_main()
         return
     end
     if white_ip_check() then
-    elseif dynamic_black_ip_check() then
-    elseif white_url_check() then
-    elseif black_ip_check() then
-    elseif user_agent_attack_check() then
-    elseif referer_check() then
-    elseif cc_attack_check() then
-    elseif cookie_attack_check() then
-    elseif file_upload_check() then
-    elseif url_attack_check() then
-    elseif url_args_attack_check() then
-    elseif post_attack_check() then
-    else
+        return
+    end
+    if dynamic_black_ip_check() then
+        return
+    end
+    local url_whitelisted = white_url_check()
+    if black_ip_check() then
+        return
+    end
+    if user_agent_attack_check() then
+        return
+    end
+    if referer_check() then
+        return
+    end
+    if cc_attack_check() then
+        return
+    end
+    if cookie_attack_check() then
+        return
+    end
+    if file_upload_check() then
+        return
+    end
+    -- white URL only skips URL path and args checks, not other security checks
+    if not url_whitelisted then
+        if url_attack_check() then
+            return
+        end
+        if url_args_attack_check() then
+            return
+        end
+    end
+    if post_attack_check() then
         return
     end
 end
