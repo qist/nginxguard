@@ -7,6 +7,19 @@ local rulematch = ngx.re.find
 local unescape = ngx.unescape_uri
 local io = require 'io'
 
+--Recursive URL-decode: decode up to 3 layers to catch multi-encoded attacks
+--e.g. %25253Cscript -> %253Cscript -> %3Cscript -> <script
+local function recursive_unescape(s)
+    if s == nil then return s end
+    local prev = s
+    for _ = 1, 3 do
+        local decoded = unescape(prev)
+        if decoded == prev then break end  -- stable, no more changes
+        prev = decoded
+    end
+    return prev
+end
+
 --Per-request cached waf_enable (avoids ~13 redundant get_effective_config calls)
 local function is_waf_enabled()
     if ngx.ctx._waf_enabled == nil then
@@ -138,12 +151,12 @@ local function cookie_attack_check()
     if get_effective_config("cookie_check") == "on" then
         local USER_COOKIE = ngx.var.http_cookie
         if USER_COOKIE ~= nil then
-            -- check both raw and unescaped cookie to catch URL-encoded attacks
-            local matched = match_any_rule('cookie.rule', USER_COOKIE, "jo")
+            -- check both raw and recursively decoded cookie to catch multi-encoded attacks
+            local matched = match_any_rule('cookie.rule', USER_COOKIE, "joi")
             if not matched then
-                local decoded = unescape(USER_COOKIE)
+                local decoded = recursive_unescape(USER_COOKIE)
                 if decoded ~= USER_COOKIE then
-                    matched = match_any_rule('cookie.rule', decoded, "jo")
+                    matched = match_any_rule('cookie.rule', decoded, "joi")
                 end
             end
             if matched then
@@ -161,8 +174,14 @@ end
 --deny url
 local function url_attack_check()
     if get_effective_config("url_check") == "on" then
+        -- decode URI to catch encoded path traversal (%2e%2e%2f) and encoded sensitive paths
         local REQ_URI = ngx.var.request_uri
-        local matched = match_any_rule('url.rule', REQ_URI, "jo")
+        local decoded_uri = recursive_unescape(REQ_URI)
+        -- match both raw and decoded URI
+        local matched = match_any_rule('url.rule', REQ_URI, "joi")
+        if not matched and decoded_uri ~= REQ_URI then
+            matched = match_any_rule('url.rule', decoded_uri, "joi")
+        end
         if matched then
             log_record('Deny_URL',REQ_URI,"-",matched)
             if is_waf_enabled() == "on" then
@@ -189,7 +208,7 @@ local function url_args_attack_check()
                 ARGS_DATA = val
             end
             if ARGS_DATA and type(ARGS_DATA) ~= "boolean" then
-                local matched = match_any_rule('args.rule', unescape(ARGS_DATA), "jo")
+                local matched = match_any_rule('args.rule', recursive_unescape(ARGS_DATA), "joi")
                 if matched then
                     log_record('Deny_URL_Args',ngx.var.request_uri,"-",matched)
                     if is_waf_enabled() == "on" then
@@ -229,7 +248,7 @@ local function referer_check()
     if get_effective_config("referer_check") == "on" then
         local REFERER = ngx.var.http_referer
         if REFERER ~= nil then
-            local matched = match_any_rule('referer.rule', REFERER, "jo")
+            local matched = match_any_rule('referer.rule', REFERER, "joi")
             if matched then
                 log_record('Deny_Referer', ngx.var.request_uri, "-", matched)
                 if is_waf_enabled() == "on" then
@@ -340,7 +359,7 @@ local function file_upload_check()
 
         -- match each filename against combined rules (fast path)
         for _, fname in ipairs(filenames) do
-            local matched = match_any_rule('fileext.rule', fname, "jo")
+            local matched = match_any_rule('fileext.rule', fname, "joi")
             if matched then
                 log_record('Deny_File_Upload', ngx.var.request_uri, "-", matched)
                 if is_waf_enabled() == "on" then
@@ -379,7 +398,7 @@ local function post_attack_check()
                     POST_DATA = val
                 end
                 if POST_DATA and type(POST_DATA) ~= "boolean" then
-                    local matched = match_any_rule('post.rule', POST_DATA, "jo")
+                    local matched = match_any_rule('post.rule', POST_DATA, "joi")
                     if matched then
                         log_record('Deny_URL_POST', ngx.var.request_body, "-", matched)
                         if is_waf_enabled() == "on" then
@@ -413,10 +432,10 @@ local function post_attack_check()
 
                         -- prepend previous tail for cross-chunk matching
                         local data = prev_tail .. chunk
-                        -- unescape ONCE per chunk (not per rule)
-                        local decoded = unescape(data)
+                        -- recursive decode per chunk (catches multi-encoded attacks)
+                        local decoded = recursive_unescape(data)
 
-                        local matched = match_any_rule('post.rule', decoded, "jo")
+                        local matched = match_any_rule('post.rule', decoded, "joi")
                         if matched then
                             log_record('Deny_URL_POST', ngx.var.request_uri, "-", matched)
                             f:close()
@@ -439,9 +458,9 @@ local function post_attack_check()
             end
         end
         if body and #body > 0 then
-            -- unescape ONCE before the loop (not per rule)
-            local decoded_body = unescape(body)
-            local matched = match_any_rule('post.rule', decoded_body, "jo")
+            -- recursive decode (catches multi-encoded attacks)
+            local decoded_body = recursive_unescape(body)
+            local matched = match_any_rule('post.rule', decoded_body, "joi")
             if matched then
                 log_record('Deny_URL_POST', ngx.var.request_uri, "-", matched)
                 if is_waf_enabled() == "on" then
