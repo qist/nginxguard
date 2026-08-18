@@ -6,12 +6,26 @@
 NGINX_HOME="/opt/nginx"
 NGINX_BIN="$NGINX_HOME/./nginx"
 WAF_CONFIG="$NGINX_HOME/lua/waf/config.lua"
+NGINX_CONF="$NGINX_HOME/conf/nginx.conf"
 TARGET="http://127.0.0.1:80/"
 REQUESTS=50000
 CONCURRENCY=200
 UA="User-Agent: Mozilla/5.0"
 RESULT_FILE="/tmp/bench_nginxguard.txt"
 > $RESULT_FILE
+
+# 压测前注释掉 limit_conn (限制并发连接数会干扰压测结果)
+# 并调大 open_file_cache 有效期避免频繁过期
+prepare_nginx_conf() {
+    cp $NGINX_CONF ${NGINX_CONF}.bak
+    sed -i 's/^\([[:space:]]*\)limit_conn addr/#\1limit_conn addr/' $NGINX_CONF
+    sed -i 's/open_file_cache max=100000 inactive=20s/open_file_cache max=100000 inactive=300s/' $NGINX_CONF
+    sed -i 's/open_file_cache_valid 30s/open_file_cache_valid 300s/' $NGINX_CONF
+}
+
+restore_nginx_conf() {
+    [ -f ${NGINX_CONF}.bak ] && cp ${NGINX_CONF}.bak $NGINX_CONF
+}
 
 restart_nginx() {
     $NGINX_BIN -p $NGINX_HOME/ -c conf/nginx.conf -s stop 2>/dev/null || kill -TERM $(cat $NGINX_HOME/logs/nginx.pid 2>/dev/null) 2>/dev/null || true
@@ -95,6 +109,7 @@ echo "" | tee -a $RESULT_FILE
 echo "test=hello_world_data_padding_padding_padding" > /tmp/post_data.txt
 
 # 备份原始配置
+prepare_nginx_conf
 cp $WAF_CONFIG ${WAF_CONFIG}.prod
 
 # 场景 A: WAF 全关（基线）— lua_package_path 等保留不动, 仅 config_waf_enable=off
@@ -136,6 +151,7 @@ run_bench "E-production" "-p /tmp/post_data.txt -T application/x-www-form-urlenc
 # 恢复生产配置
 cp ${WAF_CONFIG}.prod $WAF_CONFIG
 rm -f ${WAF_CONFIG}.prod
+restore_nginx_conf
 restart_nginx
 
 echo "========================================" | tee -a $RESULT_FILE
