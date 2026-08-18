@@ -185,15 +185,7 @@ java\.lang
 \/admin\.jsp
 \/admin\.asp
 \/admin\.aspx
-^\/admin/
-^\/manage/
-^\/manager/
-^\/panel/
-^\/cpanel
-^\/whm
-^\/plesk
-^\/dashboard\/
-^\/controlpanel
+
 \/wp-config
 \/wp-content\/backup
 \/wp-content\/uploads
@@ -216,9 +208,7 @@ java\.lang
 \/setup\.php
 \/setup\.sh
 \/setup\.exe
-^\/install\/
-^\/setup\/
-^\/upgrade\/
+
 \/phpinfo
 \/info\.php
 \/test\.php

@@ -421,6 +421,7 @@ local function post_attack_check()
                 if f then
                     local chunk_size = 65536    -- 64KB per chunk
                     local max_scan = 2097152     -- max 2MB scan for POST body
+                    local overlap = 2048        -- 2KB overlap for cross-chunk matching
                     local total = 0
                     local prev_tail = ""
                     local found = false
@@ -445,9 +446,9 @@ local function post_attack_check()
                             return true
                         end
 
-                        -- keep last 512 bytes as overlap
-                        if #data > 512 then
-                            prev_tail = string.sub(data, -512)
+                        -- keep last 2KB as overlap for cross-chunk matching
+                        if #data > overlap then
+                            prev_tail = string.sub(data, -overlap)
                         else
                             prev_tail = data
                         end

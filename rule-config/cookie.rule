@@ -1,7 +1,13 @@
 \.\./
+\.\\\.\\
+%2e%2e%2f
+%2e%2e/
+\.%2e/
+%2e%2e%5c
+%2e%2e\\
 \:\$
 \$\{
-(?i:select).*(?i:from).*(?i:information_schema|union|concat|sleep|benchmark|load_file|into|outfile|char|hex|database|user|version|@@|cast|convert)
+(?i:select).*(?i:from).*(?i:information_schema|union|concat|sleep|benchmark|load_file|into|outfile|@@|cast|convert)
 (?:(?i:union(.*?)(?i:select)))
 (?i:having)|rongjitest
 sleep\((\s*)(\d*)(\s*)\)
@@ -24,7 +30,7 @@ java\.lang
 (?i:order)\s+(?i:by)\s+\d+\s*([#\-]|/\*|--|\s*$)
 proc\/self\/environ
 mosconfig\[[a-z0-9_]{1,200}\]=
-(?i:cmd|command|exec|execute|shell|terminal|console|powershell|pwsh)=[^&\s]{0,20}.*(ls|cat|whoami|id|uname|pwd|ifconfig|netstat|ping|wget|curl|nc|ncat|bash|sh|python|perl|ruby|chmod|chown|kill|rm|mv|cp|touch|mkdir|rmdir|find|grep|awk|sed|sort|uniq|head|tail|less|more|env|export|source|history|sudo|su)
+(?i:cmd|command|exec|execute|shell|terminal|console|powershell|pwsh)=[^&\s]{0,10}(ls|cat|whoami|id|uname|ifconfig|netstat|wget|curl|nc|ncat|bash|chmod|chown|kill|rm|sudo|su)(\s|$|;|&|\|)
 (?i:(?:perl|python|ruby|tcl)\s+-[eich]|(?:perl|python|ruby|tcl)\s+\/(?:tmp|dev|var|home|root|proc|etc)|exec\s+(?:perl|python|ruby|tcl))
 (?i:alert|confirm|prompt)\s*\(
 javascript\:
