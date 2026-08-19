@@ -252,7 +252,7 @@ CC 超限后 IP 自动加入 `badGuys` 共享字典，600 秒内所有请求直�
 
 当 NginxGuard 部署在 CDN/反向代理后面时，需要从 `X-Forwarded-For` 获取真实客户端 IP。但直接信任 XFF 会让攻击者伪造该头绕过 IP 黑白名单。
 
-解决方案：在 `config.lua` 中设置 `trust_proxy_headers = "on"`，并在 `rule-config/cdnip.rule` 中配置 CDN 的 IP 段：
+解决方案：在 `config.lua` 中设置 `trust_proxy_headers = "on"`，并在 `rule-config/cdnip.rule` 中配置你实际使用的 CDN/代理 IP 段：
 
 ```lua
 -- config.lua
@@ -261,15 +261,23 @@ config_trust_proxy_headers = "on"
 
 ```bash
 # rule-config/cdnip.rule
-# Cloudflare IPv4
+# 填入你实际使用的 CDN/代理 IP 段，以下为示例（请按需替换）
+# 各家 CDN IP 列表查询地址：
+#   Cloudflare:    https://www.cloudflare.com/ips/
+#   AWS CloudFront: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/LocationsOfEdgeServers.html
+#   Akamai:        https://developer.akamai.com/cli/apps/akamai-cli-list-ip
+#   阿里云 CDN:    https://help.aliyun.com/document_detail/27134.html
+#   腾讯云 CDN:    https://cloud.tencent.com/document/product/228/52935
+
+# Cloudflare IPv4（示例）
 173.245.48.0/20
-103.21.244.0/22
 104.16.0.0/13
-# Cloudflare IPv6
+# Cloudflare IPv6（示例）
 2400:cb00::/32
 2606:4700::/32
-# 内部代理
+# 内部代理/负载均衡器
 10.0.0.0/8
+192.168.0.0/16
 ```
 
 此时 NginxGuard 的行为：
@@ -279,7 +287,7 @@ config_trust_proxy_headers = "on"
 | `remote_addr` 在 cdnip.rule 中 | 信任 XFF | 提取真实客户端 IP |
 | `remote_addr` 不在 cdnip.rule 中 | 不信任 XFF | 使用 `remote_addr`（防直连伪造） |
 | `cdnip.rule` 文件不存在 | 信任所有 XFF | 原始行为，向后兼容 |
-| `cdnip.rule` 文件为空 | 信任所有 XFF | 同上 |
+| `cdnip.rule` 文件为空（或全注释） | 信任所有 XFF | 等同于文件不存在，回落原始行为 |
 
 支持域名级覆盖：
 
@@ -632,26 +640,42 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 | FFI stat | LuaJIT FFI 直接调用 libc `stat()` 获取 mtime，避免 Lua IO 开销 |
 | glob 预编译 | IP 通配符规则（`192.168.*`、`2001:db8::*`）在加载时预编译 regex |
 | cc_rate 缓存 | CC 限速参数解析提升到 worker 级，仅配置变更时重解析 |
-| waf_enable 缓存 | 每请求 ~13 次 `get_effective_config` 改为 `ngx.ctx` 首次缓存 |
+| 配置一次加载 | 所有 16 个配置项在请求入口一次性加载到 `ngx.ctx._cfg`，避免每检测项重复调用 `get_effective_config` |
 | require 模块级 | `cjson`/`io`/`os` 从函数内 `require` 提到模块顶部 |
 | 消除冗余调用 | `file_upload_check`/`post_attack_check` 移除多余的 `get_rule` 调用 |
 | 同步日志 | 仅攻击触发时同步写入+flush，正常流量零 IO 开销 |
-| 请求级缓存 | `client_ip`/`domain`/`domain_config`/`waf_enable` 首次计算后缓存到 `ngx.ctx` |
+| 请求级缓存 | `client_ip`/`domain`/`domain_config`/`headers`/`is_cdn` 首次计算后缓存到 `ngx.ctx` |
 | 白名单 string.find | `whiteua.rule`/`whiteurl.rule` 用 `string.find` 替代 `ngx.re.find`，避免 PCRE JIT 开销 |
 | 空规则快速返回 | `match_any_rule` 检测 `entry.empty` 标志，空规则文件立即返回 nil |
 | Cookie 检测后移 | Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即短路返回 |
+| **is_cdn_ip 缓存** | `trust_proxy_headers=on` 时，`is_cdn_ip()` 结果缓存到 `ngx.ctx._is_cdn`，避免同请求内重复 CIDR 匹配 |
+| **内网 IP 快速短路** | 127.x/10.x/172.x/192.x 开头的 `remote_addr` 跳过 37 条 CIDR 二分查找，O(1) 判定 |
+| **headers 缓存** | `ngx.req.get_headers()` 结果缓存到 `ngx.ctx._headers`，避免重复构建请求头 table |
+| **UA bloom-filter 预检查** | `is_white_ua()` 先检查 7 个 bot 标记词（bot/spider/crawl 等），99% 正常流量跳过 50 次 `string.find` |
+| **url_args 无参数短路** | `next(REQ_ARGS) == nil` 时直接返回，跳过 `pairs()` 循环和正则匹配 |
+| **最小输入长度检查** | `match_any_rule` 中 `#input < 2` 直接返回 nil，避免对短参数做正则匹配 |
+| **filepath 字符串缓存** | `get_rule_entry` 缓存 `config_rule_dir .. '/' .. rulefilename` 到 worker 级变量，避免每请求字符串拼接 |
 
 ### 测试结果
 
 | 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
 |------|-------|-----|-----|-----|---------|
-| NginxGuard 全关（基线） | 26,786 | 312% | 166 MB | 29ms | — |
-| NginxGuard 全开（无 CC/POST） | 17,358 | 298% | 174 MB | 52ms | 35.2% |
-| NginxGuard + CC（POST 关闭） | 20,252 | 272% | 173 MB | 30ms | — |
-| NginxGuard + POST（CC 关闭） | 10,520 | 307% | 177 MB | 64ms | — |
-| NginxGuard 全开（生产） | 21,076 | 314% | 184 MB | 69ms | 21.3% |
+| NginxGuard 全关（基线） | 25,550 | 296% | 166 MB | 29ms | — |
+| NginxGuard 全开（无 CC/POST） | 19,739 | 320% | 173 MB | 39ms | 22.7% |
+| NginxGuard + CC（POST 关闭） | 21,445 | 313% | 172 MB | 38ms | — |
+| NginxGuard + POST（CC 关闭） | 10,981 | 315% | 174 MB | 64ms | — |
+| NginxGuard 全开（生产） | 20,985 | 310% | 173 MB | 34ms | 17.9% |
 
-> **结论**：经过多轮深度优化后，NginxGuard 全开（生产配置）相比全关的吞吐下降稳定在 **21%** 左右。本次优化措施：
+#### trust_proxy_headers 性能对比
+
+| 场景 | req/s | TPR | 说明 |
+|------|-------|-----|------|
+| WAF 全关（基线） | 25,550 | 7.83ms | 无 Lua 开销 |
+| `trust_proxy_headers=off` | 18,254 | 5.48ms | 仅用 remote_addr，无 XFF 解析 |
+| `trust_proxy_headers=on` + cdnip.rule | 20,582 | 5.49ms | 优化后已接近 off 水平 |
+| `trust_proxy_headers=on` + 无 cdnip.rule | 18,221 | 5.49ms | 无条件信任 XFF |
+
+> **结论**：经过多轮深度优化后，NginxGuard 全开（生产配置）相比全关的吞吐下降稳定在 **18%** 左右。关键优化措施：
 >
 > 1. **请求类型短路**：GET/HEAD/OPTIONS/DELETE 跳过 POST 和文件上传检测，避免无意义的 body 读取
 > 2. **规则双引擎**：纯字符串规则用 `string.find`（快 10 倍），正则规则用合并 `ngx.re.find`，减少正则引擎负载
@@ -660,8 +684,14 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 > 5. **白名单 hash 优化**：`whiteua.rule`（50条纯字符串）和 `whiteurl.rule` 使用 `string.find` 替代 `ngx.re.find`，避免 PCRE JIT 开销
 > 6. **空规则快速返回**：规则文件为空时 `match_any_rule` 立即返回 nil，避免无谓的 regex 编译
 > 7. **Cookie 检测后移**：Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即可短路返回
+> 8. **is_cdn_ip 请求级缓存**：`trust_proxy_headers=on` 时缓存 CDN IP 匹配结果，避免重复 CIDR 二分查找
+> 9. **内网 IP 快速短路**：127.x/10.x/172.x/192.x 跳过完整 CIDR 匹配，O(1) 判定
+> 10. **UA bloom-filter 预检查**：7 个 bot 标记词预过滤，99% 正常流量跳过 50 次 string.find
+> 11. **url_args 无参数短路**：无查询参数时直接返回，跳过 pairs() 循环和正则匹配
+> 12. **最小输入长度检查**：输入 < 2 字符直接跳过规则匹配，避免无谓的正则执行
 >
-> CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。内存增加约 10-18MB（规则缓存 + 共享字典）。
+> `trust_proxy_headers=on` + cdnip.rule 的性能开销已从 -10% 降低到接近 0%（与 off 持平）。
+> CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。内存增加约 7MB（规则缓存 + 共享字典）。
 
 ---
 

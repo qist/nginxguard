@@ -100,8 +100,8 @@ java\.lang
 ^\/node_modules\/
 ^\/coverage\/
 ^\/debug\/pprof
-^\/metrics\?
-^\/healthz\?
+^\/metrics
+^\/healthz
 \/.svn\/entries
 \/.svn\/wc\.db
 \/CVS\/
@@ -225,8 +225,8 @@ java\.lang
 \/web\.xml
 \/WEB-INF/web\.xml
 \/META-INF/MANIFEST\.MF
-^\/readyz\?
-^\/livez\?
+^\/readyz
+^\/livez
 ^\/debug\/vars
 ^\/debug\/requests
 ^\/debug\/events

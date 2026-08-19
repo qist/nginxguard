@@ -12,7 +12,7 @@
 \.(war|ear|jar|class|java|jad)
 \.(apk|ipa|deb|rpm|msi|pkg|app|dmg|exe|scr|com|bat|cmd|vbs|vba|wsf|wsh|ps1|psm1|hta|pif|gadget|bin|run)
 \.(asp|aspx|asax|ascx|ashx|asmx|axd|config|browser|skin|master|sitemap|webinfo|cshtml|vbhtml)
-\.(jsp|jspx|jspf|do|action)
+\.(jsp|jspx|jspf|do|action)(?:$|\?|\.)
 \.(py|pyc|pyo|pyw|pyz|pyd|rb|rbw|pl|pm|pod|cgi|fcgi|lua|luac|tcl|awk|sed)
 \.(php|php3|php4|php5|php6|php7|php8|phps|phtml|pht|phar|inc)
 \.(aws|gcloud|azure|kube|docker|k8s|terraform|tfstate|tfvars|tfplan|ansible|vault|openssl|gnupg|gpg|pki)

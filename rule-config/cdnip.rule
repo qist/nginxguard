@@ -6,32 +6,67 @@
 # When trust_proxy_headers="on" and this file exists:
 #   Only trust XFF/X-Real-IP when remote_addr matches an IP in this file.
 # When this file is absent: trusts XFF from any source (original behavior).
+# When this file exists but all lines are commented/empty: trusts XFF from any source
+#   (same as absent — falls back to original behavior, safe to keep an empty file).
 #
-# --- Cloudflare IPv4 ---
-173.245.48.0/20
-103.21.244.0/22
-103.22.200.0/22
-103.31.4.0/22
-141.101.64.0/18
-108.162.192.0/18
-190.93.240.0/20
-188.114.96.0/20
-197.234.240.0/22
-198.41.128.0/17
-162.158.0.0/15
-104.16.0.0/13
-104.24.0.0/14
-172.64.0.0/13
-# --- Cloudflare IPv6 ---
-2400:cb00::/32
-2606:4700::/32
-2803:f800::/32
-2405:b500::/32
-2405:8100::/32
-2a06:98c0::/29
-2c0f:f248::/29
-# --- Internal proxy ---
-127.0.0.1
-10.0.0.0/8
-172.16.0.0/12
-192.168.0.0/16
+# <<< TIP >>>
+# This file ships with ALL entries commented out.
+# As-is, it behaves the same as if the file doesn't exist (trusts all XFF).
+# To enable CDN IP verification, uncomment or add your CDN/proxy IPs below.
+# Without any active entries, XFF is trusted from any source (original behavior).
+#
+# Find your CDN's IP ranges from their official documentation:
+#   Cloudflare:  https://www.cloudflare.com/ips/
+#   AWS CloudFront: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/LocationsOfEdgeServers.html
+#   Akamai:      https://developer.akamai.com/cli/apps/akamai-cli-list-ip
+#   Aliyun CDN:  https://help.aliyun.com/document_detail/27134.html
+#   Tencent CDN: https://cloud.tencent.com/document/product/228/52935
+#
+# --- Example: Cloudflare IPv4 ---
+#173.245.48.0/20
+#103.21.244.0/22
+#103.22.200.0/22
+#103.31.4.0/22
+#141.101.64.0/18
+#108.162.192.0/18
+#190.93.240.0/20
+#188.114.96.0/20
+#197.234.240.0/22
+#198.41.128.0/17
+#162.158.0.0/15
+#104.16.0.0/13
+#104.24.0.0/14
+#172.64.0.0/13
+#
+# --- Example: Cloudflare IPv6 ---
+#2400:cb00::/32
+#2606:4700::/32
+#2803:f800::/32
+#2405:b500::/32
+#2405:8100::/32
+#2a06:98c0::/29
+#2c0f:f248::/29
+#
+# --- Example: AWS CloudFront ---
+#13.32.0.0/15
+#13.34.0.0/15
+#13.224.0.0/14
+#52.46.0.0/18
+#52.84.0.0/15
+#
+# --- Example: Aliyun CDN ---
+#203.119.169.0/24
+#203.119.170.0/23
+#203.119.173.0/24
+#203.119.176.0/21
+#
+# --- Example: Tencent Cloud CDN ---
+#203.195.144.0/24
+#203.195.160.0/24
+#203.195.192.0/24
+#
+# --- Example: Internal proxy / load balancer ---
+#127.0.0.1
+#10.0.0.0/8
+#172.16.0.0/12
+#192.168.0.0/16

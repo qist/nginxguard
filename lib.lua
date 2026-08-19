@@ -279,19 +279,20 @@ function get_client_ip()
                 end
             end
             -- Fall back to full CIDR match for non-trivial IPs (Cloudflare, etc.)
+            -- is_cdn_ip returns: true=trust, false=don't trust, nil=no rules (trust all)
             -- is_cdn_ip is forward-declared (local is_cdn_ip at line 125) so it's safe
             -- to call here even though its full definition comes later in the file.
             if cdn_ok == nil then
                 cdn_ok = is_cdn_ip(remote)
-                if cdn_ok == nil then cdn_ok = true end -- cdnip.rule absent = trust all
+                if cdn_ok == nil then cdn_ok = true end -- cdnip.rule absent/empty = trust all
             elseif cdn_ok == true then
                 -- Verify private IP guess was correct via full match
-                -- (only if cdnip.rule exists; if absent, trust all)
+                -- (only if cdnip.rule exists with rules; if absent/empty, trust all)
                 local full_check = is_cdn_ip(remote)
                 if full_check == false then
                     cdn_ok = false
                 elseif full_check == nil then
-                    cdn_ok = true -- cdnip.rule absent = trust all
+                    cdn_ok = true -- cdnip.rule absent/empty = trust all
                 end
             end
             ctx._is_cdn = cdn_ok
@@ -819,12 +820,19 @@ end
 --Unified IP rule matching: CIDR + wildcard + exact IP for all *.rule files
 --Returns: true  = IP is in CDN list (trust XFF)
 --         false = IP is NOT in CDN list (do NOT trust XFF)
---         nil   = cdnip.rule doesn't exist (trust XFF from any source, original behavior)
+--         nil   = cdnip.rule doesn't exist OR is empty/all-commented (trust all, original behavior)
 is_cdn_ip = function(ip)
     if ip == nil then return nil end
     local compiled = get_compiled_ip_rules("cdnip.rule")
     if compiled == nil then
         return nil  -- cdnip.rule doesn't exist = trust all (original behavior)
+    end
+    -- cdnip.rule exists but has no valid rules (all commented/empty) = trust all
+    -- This lets users keep an empty cdnip.rule without configuring any IPs,
+    -- falling back to original behavior (trust XFF from any source)
+    if #compiled.ipv4_ranges == 0 and #compiled.ipv6_list == 0
+       and #compiled.glob_list == 0 and #compiled.exact_list == 0 then
+        return nil
     end
     return match_compiled_ip(compiled, ip)
 end
