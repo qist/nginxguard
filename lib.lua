@@ -590,7 +590,8 @@ local function read_rule_file(filepath)
 
     worker_rule_cache[filepath] = {
         mtime = current_mtime, rules = t, combined = combined,
-        fast_rules = fast_rules, fast_hash = has_fast and fast_hash or nil,
+          fast_rules = fast_rules, fast_hash = has_fast and fast_hash or nil,
+          regex_rules = regex_rules,
         glob_compiled = glob_compiled, last_check = now,
         empty = is_empty,
     }
@@ -851,16 +852,13 @@ end
 --Shortest rules across all .rule files: '<%' (2 chars) in args.rule/cookie.rule
 local MIN_RULE_LEN = 2
 
-function match_any_rule(rulefilename, input, flags)
-    if input == nil or #input < MIN_RULE_LEN then return nil end
-    local entry = get_rule_entry(rulefilename)
-    if entry == nil then return nil end
+function match_rule_entry(entry, input, flags)
+    if entry == nil or input == nil or #input < MIN_RULE_LEN then return nil end
 
     -- Fast exit: no rules at all
     if entry.empty then return nil end
 
     -- Engine 1: Fast plain-string matching (string.find, ~10x faster than regex)
-    -- Uses fast_hash for O(1) lookup per rule, avoiding linear iteration
     if entry.fast_hash then
         for _, rule in ipairs(entry.fast_rules) do
             if string.find(input, rule, 1, true) then
@@ -870,17 +868,15 @@ function match_any_rule(rulefilename, input, flags)
     end
 
     -- Engine 2: Combined regex matching (ngx.re.find)
-    -- Only runs if the rule file has regex rules
     if entry.combined ~= nil then
         local from, _, err = rulematch(input, entry.combined, flags)
         if err then
-            ngx.log(ngx.ERR, "[NginxGuard] rule file '", rulefilename,
-                    "' combined regex compile/exec error: ", err,
+            ngx.log(ngx.ERR, "[NginxGuard] combined regex compile/exec error: ", err,
                     " — falling back to per-rule matching")
         elseif from then
-            -- Slow path (attack detected): find which specific rule matched for logging
-            for _, rule in ipairs(entry.rules) do
-                if rule ~= "" and rulematch(input, rule, flags) then
+            -- Slow path (attack detected): find which specific regex rule matched for logging
+            for _, rule in ipairs(entry.regex_rules) do
+                if rulematch(input, rule, flags) then
                     return rule
                 end
             end
@@ -891,10 +887,19 @@ function match_any_rule(rulefilename, input, flags)
     end
 
     -- Fallback: per-rule matching (when combined is nil or errored)
-    for _, rule in ipairs(entry.rules) do
-        if rule ~= "" and rulematch(input, rule, flags) then
+    for _, rule in ipairs(entry.regex_rules) do
+        if rulematch(input, rule, flags) then
             return rule
         end
+    end
+    return nil
+end
+
+function match_any_rule(rulefilename, input, flags)
+    local entry = get_rule_entry(rulefilename)
+    local matched = match_rule_entry(entry, input, flags)
+    if matched ~= nil then
+        return matched
     end
     return nil
 end

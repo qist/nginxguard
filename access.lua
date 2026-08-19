@@ -316,13 +316,17 @@ end
 --deny cookie
 local function cookie_attack_check()
     if cfg("cookie_check") == "on" then
+        local cookie_entry = get_rule_entry('cookie.rule')
+        if cookie_entry == nil or cookie_entry.empty then
+            return false
+        end
         local USER_COOKIE = var.http_cookie
         if USER_COOKIE ~= nil then
-            local matched = match_any_rule('cookie.rule', USER_COOKIE, "joi")
+            local matched = match_rule_entry(cookie_entry, USER_COOKIE, "joi")
             if not matched and has_encode_markers(USER_COOKIE) then
                 local decoded, changed = full_decode(USER_COOKIE)
                 if changed then
-                    matched = match_any_rule('cookie.rule', decoded, "joi")
+                    matched = match_rule_entry(cookie_entry, decoded, "joi")
                 end
             end
             if matched then
@@ -340,12 +344,16 @@ end
 --deny url
 local function url_attack_check()
     if cfg("url_check") == "on" then
+        local url_entry = get_rule_entry('url.rule')
+        if url_entry == nil or url_entry.empty then
+            return false
+        end
         local REQ_URI = var.request_uri
-        local matched = match_any_rule('url.rule', REQ_URI, "joi")
+        local matched = match_rule_entry(url_entry, REQ_URI, "joi")
         if not matched and string_find(REQ_URI, "%", 1, true) then
             local decoded, changed = full_decode(REQ_URI)
             if changed then
-                matched = match_any_rule('url.rule', decoded, "joi")
+                matched = match_rule_entry(url_entry, decoded, "joi")
             end
         end
         if matched then
@@ -362,6 +370,10 @@ end
 --deny url args
 local function url_args_attack_check()
     if cfg("url_args_check") == "on" then
+        local args_entry = get_rule_entry('args.rule')
+        if args_entry == nil or args_entry.empty then
+            return false
+        end
         local ok, REQ_ARGS = pcall(req_get_uri_args)
         if not ok or REQ_ARGS == nil then
             return false
@@ -375,11 +387,11 @@ local function url_args_attack_check()
         for key, val in pairs(REQ_ARGS) do
             -- check parameter name (key)
             if key and type(key) == "string" and #key > 0 then
-                local matched = match_any_rule('args.rule', key, "joi")
+                local matched = match_rule_entry(args_entry, key, "joi")
                 if not matched and has_encode_markers(key) then
-                    local decoded_key = full_decode(key)
-                    if decoded_key ~= key then
-                        matched = match_any_rule('args.rule', decoded_key, "joi")
+                    local decoded_key, changed = full_decode(key)
+                    if changed then
+                        matched = match_rule_entry(args_entry, decoded_key, "joi")
                     end
                 end
                 if matched then
@@ -398,11 +410,11 @@ local function url_args_attack_check()
                 ARGS_DATA = val
             end
             if ARGS_DATA and type(ARGS_DATA) ~= "boolean" then
-                local matched = match_any_rule('args.rule', ARGS_DATA, "joi")
+                    local matched = match_rule_entry(args_entry, ARGS_DATA, "joi")
                 if not matched and has_encode_markers(ARGS_DATA) then
                     local decoded, changed = full_decode(ARGS_DATA)
                     if changed then
-                        matched = match_any_rule('args.rule', decoded, "joi")
+                            matched = match_rule_entry(args_entry, decoded, "joi")
                     end
                 end
                 if matched then
@@ -424,9 +436,13 @@ local function user_agent_attack_check()
         if is_white_ua() then
             return false
         end
+        local ua_entry = get_rule_entry('useragent.rule')
+        if ua_entry == nil or ua_entry.empty then
+            return false
+        end
         local USER_AGENT = var.http_user_agent
         if USER_AGENT ~= nil then
-            local matched = match_any_rule('useragent.rule', USER_AGENT, "ijo")
+            local matched = match_rule_entry(ua_entry, USER_AGENT, "ijo")
             if matched then
                 log_record('Deny_USER_AGENT',var.request_uri,"-",matched)
                 if is_waf_enabled() == "on" then
@@ -442,9 +458,13 @@ end
 --deny referer
 local function referer_check()
     if cfg("referer_check") == "on" then
+        local referer_entry = get_rule_entry('referer.rule')
+        if referer_entry == nil or referer_entry.empty then
+            return false
+        end
         local REFERER = var.http_referer
         if REFERER ~= nil then
-            local matched = match_any_rule('referer.rule', REFERER, "joi")
+            local matched = match_rule_entry(referer_entry, REFERER, "joi")
             if matched then
                 log_record('Deny_Referer', var.request_uri, "-", matched)
                 if is_waf_enabled() == "on" then
@@ -514,6 +534,10 @@ end
 --deny file upload by extension
 local function file_upload_check()
     if cfg("file_upload_check") == "on" then
+        local fileext_entry = get_rule_entry('fileext.rule')
+        if fileext_entry == nil or fileext_entry.empty then
+            return false
+        end
         local CONTENT_TYPE = var.content_type
         if CONTENT_TYPE == nil then return false end
         if not string_find(CONTENT_TYPE, "multipart/form%-data", 1) then
@@ -526,7 +550,7 @@ local function file_upload_check()
         if filenames == nil or #filenames == 0 then return false end
 
         for _, fname in ipairs(filenames) do
-            local matched = match_any_rule('fileext.rule', fname, "joi")
+            local matched = match_rule_entry(fileext_entry, fname, "joi")
             if matched then
                 log_record('Deny_File_Upload', var.request_uri, "-", matched)
                 if is_waf_enabled() == "on" then
@@ -542,6 +566,10 @@ end
 --deny post (form + JSON body)
 local function post_attack_check()
     if cfg("post_check") == "on" then
+        local post_entry = get_rule_entry('post.rule')
+        if post_entry == nil or post_entry.empty then
+            return false
+        end
         -- OPTIMIZATION 1: skip body-less methods early
         local METHOD = req_get_method()
         if METHOD == "GET" or METHOD == "HEAD" or METHOD == "OPTIONS" or METHOD == "DELETE" then
@@ -550,18 +578,19 @@ local function post_attack_check()
 
         local ok = pcall(req_read_body)
         if not ok then return false end
+        local CONTENT_TYPE = var.content_type
 
         -- 1. Try form-encoded args (fast path)
-        local ok2, POST_ARGS = pcall(req_get_post_args)
+        local ok2, POST_ARGS, POST_ARGS_ERR = pcall(req_get_post_args)
         if ok2 and POST_ARGS ~= nil then
             for key, val in pairs(POST_ARGS) do
                 -- check parameter name (key)
                 if key and type(key) == "string" and #key > 0 then
-                    local matched_key = match_any_rule('post.rule', key, "joi")
+                    local matched_key = match_rule_entry(post_entry, key, "joi")
                     if not matched_key and has_encode_markers(key) then
-                        local decoded_key = full_decode(key)
-                        if decoded_key ~= key then
-                            matched_key = match_any_rule('post.rule', decoded_key, "joi")
+                        local decoded_key, changed = full_decode(key)
+                        if changed then
+                            matched_key = match_rule_entry(post_entry, decoded_key, "joi")
                         end
                     end
                     if matched_key then
@@ -580,11 +609,11 @@ local function post_attack_check()
                     POST_DATA = val
                 end
                 if POST_DATA and type(POST_DATA) ~= "boolean" then
-                    local matched = match_any_rule('post.rule', POST_DATA, "joi")
+                        local matched = match_rule_entry(post_entry, POST_DATA, "joi")
                     if not matched and has_encode_markers(POST_DATA) then
                         local decoded, changed = full_decode(POST_DATA)
                         if changed then
-                            matched = match_any_rule('post.rule', decoded, "joi")
+                                matched = match_rule_entry(post_entry, decoded, "joi")
                         end
                     end
                     if matched then
@@ -595,6 +624,14 @@ local function post_attack_check()
                         end
                     end
                 end
+            end
+            -- application/x-www-form-urlencoded has already been fully inspected
+            -- via parsed key/value pairs, so skip a second full-body scan
+            -- unless OpenResty reported truncation.
+            if CONTENT_TYPE
+                and string_find(CONTENT_TYPE, "application/x%-www%-form%-urlencoded", 1)
+                and POST_ARGS_ERR ~= "truncated" then
+                return false
             end
         end
 
@@ -617,11 +654,11 @@ local function post_attack_check()
                         if not chunk then break end
                         total = total + #chunk
                         local data = prev_tail .. chunk
-                        local matched = match_any_rule('post.rule', data, "joi")
+                          local matched = match_rule_entry(post_entry, data, "joi")
                         if not matched and has_encode_markers(data) then
                             local decoded, changed = full_decode(data)
                             if changed then
-                                matched = match_any_rule('post.rule', decoded, "joi")
+                                  matched = match_rule_entry(post_entry, decoded, "joi")
                             end
                         end
                         if matched then
@@ -644,11 +681,11 @@ local function post_attack_check()
             end
         end
         if body and #body > 0 then
-            local matched = match_any_rule('post.rule', body, "joi")
+            local matched = match_rule_entry(post_entry, body, "joi")
             if not matched and has_encode_markers(body) then
                 local decoded, changed = full_decode(body)
                 if changed then
-                    matched = match_any_rule('post.rule', decoded, "joi")
+                    matched = match_rule_entry(post_entry, decoded, "joi")
                 end
             end
             if matched then
@@ -683,8 +720,12 @@ local function waf_main()
     if dynamic_black_ip_check() then
         return
     end
-    local url_whitelisted = white_url_check()
     if black_ip_check() then
+        return
+    end
+    -- whiteurl.rule is intended as a request-path allowlist. If the current
+    -- request matches, skip the remaining UA/URL/Args/Cookie/POST checks.
+    if white_url_check() then
         return
     end
     -- Determine request type early (used for multiple short-circuits below)
@@ -710,13 +751,11 @@ local function waf_main()
         end
     end
 
-    if not url_whitelisted then
-        if url_attack_check() then
-            return
-        end
-        if url_args_attack_check() then
-            return
-        end
+    if url_attack_check() then
+        return
+    end
+    if url_args_attack_check() then
+        return
     end
 
     -- Cookie check: moved after URL/Args so short-circuit saves 1 regex on attack

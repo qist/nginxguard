@@ -92,6 +92,7 @@ test_rule "www.example.com sqlmap UA" 403 -H "Host: www.example.com" -A "sqlmap/
 test_rule "www.example.com POST SQL (post仍on)" 403 -H "Host: www.example.com" -A "Mozilla/5.0" -d "id=1+union+select+1" "$TARGET/"
 # 域名独立 whiteurl (NginxGuard放行, nginx找不到文件返回404)
 test_rule "www.example.com 白名单URL /123/ (404=放行)" 404 -H "Host: www.example.com" -A "Mozilla/5.0" "$TARGET/123/"
+test_rule "www.example.com 白名单URL /123/ + Go-http-client (404=放行)" 404 -H "Host: www.example.com" -A "Go-http-client/2.0" "$TARGET/123/"
 # 域名独立 whiteip
 test_rule "www.example.com 白名单IP 8.8.8.8" 200 -H "Host: www.example.com" -A "Mozilla/5.0" -H "X-Forwarded-For: 8.8.8.8" "$TARGET/?id=union+select"
 
