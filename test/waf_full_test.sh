@@ -217,7 +217,7 @@ echo "" | tee -a $RESULTS
 
 # 6. Cookie 攻击检测 (cookie.rule)
 echo -e "${CYAN}=== 6. Cookie 攻击检测 (cookie.rule) ===${NC}" | tee -a $RESULTS
-test_rule "Cookie SQL union" 403 -H "User-Agent: Mozilla/5.0" -b "id=1+union+select+1" "$TARGET/"
+test_rule "Cookie SQL union" 403 -H "User-Agent: Mozilla/5.0" -b "id=1 union select 1" "$TARGET/"
 test_rule "Cookie SQL sleep" 403 -H "User-Agent: Mozilla/5.0" -b "id=sleep(5)" "$TARGET/"
 test_rule "Cookie XSS script" 403 -H "User-Agent: Mozilla/5.0" -b "q=<script>alert(1)</script>" "$TARGET/"
 test_rule "Cookie path traversal" 403 -H "User-Agent: Mozilla/5.0" -b "file=../../../etc/passwd" "$TARGET/"

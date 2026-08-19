@@ -58,7 +58,7 @@ test_rule "Baiduspider + 路径遍历" 403 -A "Baiduspider" "$TARGET/?file=../..
 test_rule "Googlebot + 命令注入" 403 -A "Googlebot/2.1" "$TARGET/?q=system(ls)"
 
 echo -e "${YELLOW}  --- 白名单UA + Cookie攻击 (应拦截 403) ---${NC}" | tee -a $RESULTS
-test_rule "Googlebot + Cookie SQL" 403 -A "Googlebot/2.1" -b "id=1+union+select+1" "$TARGET/"
+test_rule "Googlebot + Cookie SQL" 403 -A "Googlebot/2.1" -b "id=1 union select 1" "$TARGET/"
 test_rule "Googlebot + Cookie XSS" 403 -A "Googlebot/2.1" -b "q=<script>alert(1)</script>" "$TARGET/"
 
 echo -e "${YELLOW}  --- 白名单UA + POST攻击 (应拦截 403) ---${NC}" | tee -a $RESULTS

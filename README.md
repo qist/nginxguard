@@ -637,25 +637,31 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 | 消除冗余调用 | `file_upload_check`/`post_attack_check` 移除多余的 `get_rule` 调用 |
 | 同步日志 | 仅攻击触发时同步写入+flush，正常流量零 IO 开销 |
 | 请求级缓存 | `client_ip`/`domain`/`domain_config`/`waf_enable` 首次计算后缓存到 `ngx.ctx` |
+| 白名单 string.find | `whiteua.rule`/`whiteurl.rule` 用 `string.find` 替代 `ngx.re.find`，避免 PCRE JIT 开销 |
+| 空规则快速返回 | `match_any_rule` 检测 `entry.empty` 标志，空规则文件立即返回 nil |
+| Cookie 检测后移 | Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即短路返回 |
 
 ### 测试结果
 
 | 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
 |------|-------|-----|-----|-----|---------|
-| NginxGuard 全关（基线） | 27,863 | 294% | 1,172 MB | 28ms | — |
-| NginxGuard 全开（无 CC/POST） | 15,291 | 290% | 1,182 MB | 42ms | 45.1% |
-| NginxGuard + CC（POST 关闭） | 21,768 | 306% | 1,182 MB | 30ms | — |
-| NginxGuard + POST（CC 关闭） | 9,634 | 330% | 1,185 MB | 77ms | — |
-| NginxGuard 全开（生产） | 22,189 | 315% | 1,182 MB | 37ms | 20.3% |
+| NginxGuard 全关（基线） | 26,786 | 312% | 166 MB | 29ms | — |
+| NginxGuard 全开（无 CC/POST） | 17,358 | 298% | 174 MB | 52ms | 35.2% |
+| NginxGuard + CC（POST 关闭） | 20,252 | 272% | 173 MB | 30ms | — |
+| NginxGuard + POST（CC 关闭） | 10,520 | 307% | 177 MB | 64ms | — |
+| NginxGuard 全开（生产） | 21,076 | 314% | 184 MB | 69ms | 21.3% |
 
-> **结论**：经过请求类型短路、规则双引擎、配置一次加载三项深度优化后，NginxGuard 全开（生产配置）相比全关的吞吐下降从 33% 降至 **20.3%**。主要优化措施：
+> **结论**：经过多轮深度优化后，NginxGuard 全开（生产配置）相比全关的吞吐下降稳定在 **21%** 左右。本次优化措施：
 >
 > 1. **请求类型短路**：GET/HEAD/OPTIONS/DELETE 跳过 POST 和文件上传检测，避免无意义的 body 读取
 > 2. **规则双引擎**：纯字符串规则用 `string.find`（快 10 倍），正则规则用合并 `ngx.re.find`，减少正则引擎负载
 > 3. **配置一次加载**：所有 16 个配置项在请求入口一次性加载到 `ngx.ctx._cfg`，避免每检测项重复调用 `get_effective_config`
 > 4. **解码快速特征检测**：`has_encode_markers` 使正常流量（无编码字符）跳过递归解码和 JS unicode 解码，零额外开销
+> 5. **白名单 hash 优化**：`whiteua.rule`（50条纯字符串）和 `whiteurl.rule` 使用 `string.find` 替代 `ngx.re.find`，避免 PCRE JIT 开销
+> 6. **空规则快速返回**：规则文件为空时 `match_any_rule` 立即返回 nil，避免无谓的 regex 编译
+> 7. **Cookie 检测后移**：Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即可短路返回
 >
-> CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。内存增加约 10MB（规则缓存 + 共享字典）。
+> CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。内存增加约 10-18MB（规则缓存 + 共享字典）。
 
 ---
 
@@ -682,15 +688,15 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
        ↓
 9. cc_attack_check    → CC 限速
        ↓
-10. cookie_check       → Cookie 攻击
+10. file_upload_check → 文件上传扩展名（非 GET/HEAD/OPTIONS/DELETE）
        ↓
-11. file_upload_check → 文件上传扩展名
+11. url_attack_check  → URL 路径攻击
        ↓
-12. url_attack_check  → URL 路径攻击
+12. url_args_check    → URL 参数攻击
        ↓
-13. url_args_check    → URL 参数攻击
+13. cookie_check      → Cookie 攻击
        ↓
-14. post_check        → POST 攻击（表单 + JSON body）
+14. post_check        → POST 攻击（表单 + JSON body，非 GET/HEAD/OPTIONS/DELETE）
        ↓
      放行
 ```

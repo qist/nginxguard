@@ -164,21 +164,53 @@ local function dynamic_black_ip_check()
 end
 
 --allow white url
+--Uses string.find (plain mode) instead of ngx.re.find for each whitelist entry
+--This avoids PCRE JIT overhead for simple path patterns like /static/, /api/login
 local function white_url_check()
     if cfg("white_url_check") == "on" then
-        if match_any_rule('whiteurl.rule', var.request_uri, "joi") then
-            return true
+        local entry = get_rule_entry('whiteurl.rule')
+        if entry == nil or entry.empty then return false end
+        local REQ_URI = var.request_uri
+        -- Check plain-string rules first (fast path, no regex)
+        if entry.fast_hash then
+            for _, rule in ipairs(entry.fast_rules) do
+                if string_find(REQ_URI, rule, 1, true) then
+                    return true
+                end
+            end
+        end
+        -- Fall back to regex for complex whitelist patterns
+        if entry.combined ~= nil then
+            if rulematch(REQ_URI, entry.combined, "joi") then
+                return true
+            end
         end
     end
 end
 
 --check if UA is whitelisted (search engine bots skip UA blacklist only)
+--whiteua.rule contains 50 plain-string bot names (Googlebot, bingbot, etc.)
+--Uses string.find (plain mode) instead of ngx.re.find for each entry
+--This avoids PCRE JIT overhead for simple substring matching
 local function is_white_ua()
     if cfg("white_ua_check") == "on" then
         local USER_AGENT = var.http_user_agent
         if USER_AGENT ~= nil then
-            if match_any_rule('whiteua.rule', USER_AGENT, "ijo") then
-                return true
+            local entry = get_rule_entry('whiteua.rule')
+            if entry == nil or entry.empty then return false end
+            -- Fast path: plain-string rules via string.find
+            if entry.fast_hash then
+                for _, rule in ipairs(entry.fast_rules) do
+                    if string_find(USER_AGENT, rule, 1, true) then
+                        return true
+                    end
+                end
+            end
+            -- Fall back to regex for complex patterns
+            if entry.combined ~= nil then
+                if rulematch(USER_AGENT, entry.combined, "ijo") then
+                    return true
+                end
             end
         end
     end
@@ -620,6 +652,10 @@ local function waf_main()
     if black_ip_check() then
         return
     end
+    -- Determine request type early (used for multiple short-circuits below)
+    local METHOD = req_get_method()
+    local is_bodyless = (METHOD == "GET" or METHOD == "HEAD" or METHOD == "OPTIONS" or METHOD == "DELETE")
+
     -- Request-type checks (always run)
     if user_agent_attack_check() then
         return
@@ -630,15 +666,9 @@ local function waf_main()
     if cc_attack_check() then
         return
     end
-    if cookie_attack_check() then
-        return
-    end
 
     -- OPTIMIZATION 1: request-type short-circuit
     -- GET/HEAD/OPTIONS/DELETE: skip file_upload and post checks
-    local METHOD = req_get_method()
-    local is_bodyless = (METHOD == "GET" or METHOD == "HEAD" or METHOD == "OPTIONS" or METHOD == "DELETE")
-
     if not is_bodyless then
         if file_upload_check() then
             return
@@ -652,6 +682,12 @@ local function waf_main()
         if url_args_attack_check() then
             return
         end
+    end
+
+    -- Cookie check: moved after URL/Args so short-circuit saves 1 regex on attack
+    -- GET Cookie attacks exist (XSS injection via cookie), so we still check all methods
+    if cookie_attack_check() then
+        return
     end
 
     if not is_bodyless then

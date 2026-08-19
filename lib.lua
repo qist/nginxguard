@@ -500,8 +500,14 @@ local function read_rule_file(filepath)
     -- Dual-engine: separate plain-string rules (fast: string.find) from regex rules
     -- Plain rules have NO regex metacharacters: ( ) [ ] { } . * + ? ^ $ | \
     -- These can be matched with string.find (plain mode) which is ~10x faster than regex
+    --
+    -- fast_hash: for short plain-string rules (e.g. whiteua.rule: "Googlebot"),
+    -- build a hash set for O(1) substring check via string.find(input, rule, 1, true)
+    -- This avoids linear iteration over fast_rules array for each request.
     local fast_rules = {}
+    local fast_hash = {}
     local regex_rules = {}
+    local has_fast = false
     if not is_cdnip then
         for _, r in ipairs(t) do
             if r ~= "" then
@@ -510,6 +516,8 @@ local function read_rule_file(filepath)
                     table.insert(regex_rules, r)
                 else
                     table.insert(fast_rules, r)
+                    fast_hash[r] = true
+                    has_fast = true
                 end
                 table.insert(parts, r)
             end
@@ -531,9 +539,14 @@ local function read_rule_file(filepath)
         end
     end
 
+    -- empty flag: if no rules at all, match_any_rule returns nil immediately
+    local is_empty = (#fast_rules == 0 and #regex_rules == 0)
+
     worker_rule_cache[filepath] = {
         mtime = current_mtime, rules = t, combined = combined,
-        fast_rules = fast_rules, glob_compiled = glob_compiled, last_check = now
+        fast_rules = fast_rules, fast_hash = has_fast and fast_hash or nil,
+        glob_compiled = glob_compiled, last_check = now,
+        empty = is_empty,
     }
     return t
 end
@@ -775,9 +788,12 @@ function match_any_rule(rulefilename, input, flags)
     local entry = get_rule_entry(rulefilename)
     if entry == nil then return nil end
 
+    -- Fast exit: no rules at all
+    if entry.empty then return nil end
+
     -- Engine 1: Fast plain-string matching (string.find, ~10x faster than regex)
-    -- Only runs if the rule file has plain-string rules
-    if entry.fast_rules and #entry.fast_rules > 0 then
+    -- Uses fast_hash for O(1) lookup per rule, avoiding linear iteration
+    if entry.fast_hash then
         for _, rule in ipairs(entry.fast_rules) do
             if string.find(input, rule, 1, true) then
                 return rule
