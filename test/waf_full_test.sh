@@ -12,6 +12,7 @@ PASS=0; FAIL=0; TOTAL=0; ERRORS=""
 RESULTS="/tmp/waf_test_results.txt"
 > $RESULTS
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+RULE_CACHE_WAIT=12
 
 log()  { echo "[$(date '+%H:%M:%S')] $*" | tee -a $RESULTS; }
 ok()   { echo -e "  ${GREEN}PASS${NC}  $1  (HTTP $2)" | tee -a $RESULTS; PASS=$((PASS+1)); TOTAL=$((TOTAL+1)); }
@@ -298,7 +299,7 @@ if [ "$code" = "200" ]; then ok "XFF白名单IP 8.8.8.8 放行" "$code"; else ba
 
 # 10c. 临时移除 cdnip.rule → XFF 被无条件信任 → 白名单 IP 放行
 $SSH180 "mv /opt/nginx/lua/waf/rule-config/cdnip.rule /opt/nginx/lua/waf/rule-config/cdnip.rule.bak 2>/dev/null"
-sleep 3
+sleep "$RULE_CACHE_WAIT"
 $SSH180 "$NGINX_CMD -s reload 2>&1"
 sleep 2
 code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 8.8.8.8" "$TARGET/?id=union+select")
@@ -308,7 +309,7 @@ code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Moz
 if [ "$code" = "403" ]; then ok "无 cdnip.rule: XFF非白名单IP 1.2.3.4 + SQLi 拦截" "$code"; else bad "无 cdnip.rule: XFF非白名单IP 1.2.3.4 + SQLi" "$code" "403"; fi
 # 恢复 cdnip.rule
 $SSH180 "mv /opt/nginx/lua/waf/rule-config/cdnip.rule.bak /opt/nginx/lua/waf/rule-config/cdnip.rule 2>/dev/null"
-sleep 3
+sleep "$RULE_CACHE_WAIT"
 $SSH180 "$NGINX_CMD -s reload 2>&1"
 sleep 2
 

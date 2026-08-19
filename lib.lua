@@ -8,6 +8,9 @@ local bit = require("bit")  -- LuaJIT bit module, always available in OpenResty
 
 --Cache via ngx.shared.dict, fallback to direct read if not configured
 local rulematch = ngx.re.find
+local var = ngx.var
+local string_lower = string.lower
+local string_match = string.match
 
 --File modification time detection
 --Uses LuaJIT FFI (built into OpenResty) to call libc stat() — no extra module needed
@@ -123,11 +126,30 @@ end
 --Forward declaration: is_cdn_ip is defined later (after get_rule_entry) but
 --get_client_ip (defined above) references it at runtime. This ensures the local binding.
 local is_cdn_ip
+local get_compiled_ip_rules
+local is_empty_ip_rule_compiled
+local match_trusted_proxy_shortcut
+local match_compiled_ip
 
 --Validate IP address (IPv4 or IPv6)
 local function is_valid_ip(s)
     if s == nil or type(s) ~= "string" then return false end
     return is_valid_ipv4(s) or is_valid_ipv6(s)
+end
+
+local function extract_first_valid_ip_from_xff(xff)
+    if xff == nil then return nil end
+    local first = string_match(xff, "^%s*([^,%s]+)")
+    if first and is_valid_ip(first) then
+        return first
+    end
+    for entry in xff:gmatch("([^,]+)") do
+        local candidate = entry:match("^%s*(%S+)%s*$")
+        if candidate and is_valid_ip(candidate) then
+            return candidate
+        end
+    end
+    return nil
 end
 
 --Convert IPv4 dotted-quad to 32-bit number (returns nil on invalid)
@@ -256,83 +278,50 @@ function get_client_ip()
     -- get_effective_config does domain.json lookup + _G lookup; ctx._cfg is pre-loaded by access.lua cfg()
     local trust_proxy = ctx._cfg and ctx._cfg["trust_proxy_headers"] or get_effective_config("trust_proxy_headers")
     if trust_proxy ~= "off" then
-        local remote = ngx.var.remote_addr
+        local remote = var.remote_addr
         -- OPTIMIZATION: cache is_cdn_ip() result per-request
         -- is_cdn_ip does CIDR binary search + IP parsing; avoid repeating across multiple get_client_ip calls
         local cdn_ok = ctx._is_cdn
         if cdn_ok == nil then
-            -- OPTIMIZATION: fast short-circuit for loopback/private IPs before full CIDR match
-            -- 127.x / 10.x / 172.16-31.x / 192.168.x are in cdnip.rule but checking them
-            -- via string prefix is O(1) vs binary search over 37 CIDR ranges
-            if remote == "127.0.0.1" or remote == "::1" then
+            local compiled_cdn = get_compiled_ip_rules("cdnip.rule")
+            if compiled_cdn == nil or is_empty_ip_rule_compiled(compiled_cdn) then
+                -- cdnip.rule absent/empty: keep original behavior and trust proxy headers.
                 cdn_ok = true
-            elseif remote then
-                -- quick check: does remote look like a private IP?
-                local a = remote:match("^(%d+)")
-                if a then
-                    a = tonumber(a)
-                    -- 10.x.x.x = private, 192.168.x.x = private, 172.16-31.x.x = private
-                    -- These are in cdnip.rule; short-circuit avoids full CIDR binary search
-                    if a == 10 or a == 192 or a == 172 or a == 127 then
-                        cdn_ok = true
-                    end
+            else
+                -- Only use the shortcut when cdnip.rule explicitly includes these
+                -- local/private proxy ranges; otherwise fall back to full matching.
+                cdn_ok = match_trusted_proxy_shortcut(compiled_cdn, remote)
+                if cdn_ok == nil then
+                    cdn_ok = match_compiled_ip(compiled_cdn, remote)
                 end
-            end
-            -- Fall back to full CIDR match for non-trivial IPs (Cloudflare, etc.)
-            -- is_cdn_ip returns: true=trust, false=don't trust, nil=no rules (trust all)
-            -- is_cdn_ip is forward-declared (local is_cdn_ip at line 125) so it's safe
-            -- to call here even though its full definition comes later in the file.
-            if cdn_ok == nil then
-                cdn_ok = is_cdn_ip(remote)
-                if cdn_ok == nil then cdn_ok = true end -- cdnip.rule absent/empty = trust all
-            elseif cdn_ok == true then
-                -- Verify private IP guess was correct via full match
-                -- (only if cdnip.rule exists with rules; if absent/empty, trust all)
-                local full_check = is_cdn_ip(remote)
-                if full_check == false then
+                -- cdnip.rule exists and has active entries:
+                -- true  = remote_addr is a trusted proxy, continue reading proxy headers
+                -- false = remote_addr is not trusted, fall back to direct remote_addr
+                if cdn_ok == nil then
                     cdn_ok = false
-                elseif full_check == nil then
-                    cdn_ok = true -- cdnip.rule absent/empty = trust all
                 end
             end
             ctx._is_cdn = cdn_ok
         end
-        if cdn_ok ~= false then
-            -- OPTIMIZATION: cache ngx.req.get_headers() per-request
-            -- get_headers() builds a full table of all request headers; avoid repeating
-            local headers = ctx._headers
-            if headers == nil then
-                headers = ngx.req.get_headers()
-                ctx._headers = headers
-            end
+        if cdn_ok == true then
+            -- Direct nginx vars avoid allocating a full headers table per request.
             -- 1. CF-Connecting-IP (Cloudflare specific, most reliable)
-            ip = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
+            ip = var.http_cf_connecting_ip
             if ip ~= nil and not is_valid_ip(ip) then ip = nil end
             -- 2. X-Real-IP
             if ip == nil then
-                ip = headers["X_real_ip"] or headers["X-Real-IP"]
+                ip = var.http_x_real_ip
                 if ip ~= nil and not is_valid_ip(ip) then ip = nil end
             end
             -- 3. X-Forwarded-For (take first valid IP if multiple)
             if ip == nil then
-                local xff = headers["X_Forwarded_For"] or headers["X-Forwarded-For"]
-                if xff then
-                    -- extract first valid IP: "103.119.132.48, 162.158.179.193" -> "103.119.132.48"
-                    -- strictly validate IP format to prevent spoofing with fake hostnames
-                    for entry in xff:gmatch("([^,]+)") do
-                        local candidate = entry:match("^%s*(%S+)%s*$")
-                        if candidate and is_valid_ip(candidate) then
-                            ip = candidate
-                            break
-                        end
-                    end
-                end
+                ip = extract_first_valid_ip_from_xff(var.http_x_forwarded_for)
             end
         end
     end
     -- 4. remote_addr (always available, or fallback when headers not trusted or not from CDN)
     if ip == nil then
-        ip = ngx.var.remote_addr
+        ip = var.remote_addr
     end
     if ip == nil then
         ip = "unknown"
@@ -590,10 +579,11 @@ local function read_rule_file(filepath)
 
     worker_rule_cache[filepath] = {
         mtime = current_mtime, rules = t, combined = combined,
-          fast_rules = fast_rules, fast_hash = has_fast and fast_hash or nil,
-          regex_rules = regex_rules,
+        fast_rules = fast_rules, fast_hash = has_fast and fast_hash or nil,
+        regex_rules = regex_rules,
         glob_compiled = glob_compiled, last_check = now,
         empty = is_empty,
+        cache_key = filepath .. "|" .. tostring(current_mtime),
     }
     return t
 end
@@ -661,6 +651,24 @@ end
 --Worker-level cache for compiled IP rules
 --key: filepath → { ipv4_ranges=, ipv6_list=, glob_list=, exact_list=, mtime= }
 local worker_ip_cache = {}
+local worker_match_cache = {}
+local worker_match_cache_count = 0
+local MATCH_CACHE_MAX = 4096
+local MATCH_CACHE_INPUT_MAX = 512
+
+local function set_worker_match_cache(key, value)
+    if key == nil then
+        return
+    end
+    if worker_match_cache[key] == nil then
+        if worker_match_cache_count >= MATCH_CACHE_MAX then
+            worker_match_cache = {}
+            worker_match_cache_count = 0
+        end
+        worker_match_cache_count = worker_match_cache_count + 1
+    end
+    worker_match_cache[key] = value
+end
 
 --Compile IP rule lines into pre-compiled CIDR ranges, glob regexes, exact IPs
 --Skips comment lines (#) and empty lines
@@ -670,6 +678,12 @@ local function compile_ip_rules(rules)
     local ipv6_list = {}
     local glob_list = {}
     local exact_list = {}
+    local exact_set = {}
+    local shortcut_loopback_v4 = false
+    local shortcut_loopback_v6 = false
+    local shortcut_private_10 = false
+    local shortcut_private_172 = false
+    local shortcut_private_192 = false
 
     for _, line in ipairs(rules) do
         if line ~= "" and not line:match("^#") then
@@ -678,6 +692,13 @@ local function compile_ip_rules(rules)
                 local cidr_ip, prefix_str = line:match("^([%d%.:%x]+)/(%d+)$")
                 if cidr_ip and prefix_str then
                     local prefix = tonumber(prefix_str)
+                    if cidr_ip == "10.0.0.0" and prefix == 8 then
+                        shortcut_private_10 = true
+                    elseif cidr_ip == "172.16.0.0" and prefix == 12 then
+                        shortcut_private_172 = true
+                    elseif cidr_ip == "192.168.0.0" and prefix == 16 then
+                        shortcut_private_192 = true
+                    end
                     if cidr_ip:find(":") then
                         -- IPv6 CIDR
                         local c0, c1, c2, c3 = ipv6_to_chunks(cidr_ip)
@@ -730,10 +751,22 @@ local function compile_ip_rules(rules)
                 end
             elseif line:find("%*") then
                 -- Wildcard pattern (e.g. 192.168.*)
+                if line == "10.*" or line == "10.*.*.*" then
+                    shortcut_private_10 = true
+                elseif line == "192.168.*" or line == "192.168.*.*" then
+                    shortcut_private_192 = true
+                end
                 table.insert(glob_list, glob_to_regex(line))
             else
                 -- Exact IP (normalize to lowercase for case-insensitive IPv6 matching)
-                table.insert(exact_list, string.lower(line))
+                local exact_ip = string.lower(line)
+                if exact_ip == "127.0.0.1" then
+                    shortcut_loopback_v4 = true
+                elseif exact_ip == "::1" then
+                    shortcut_loopback_v6 = true
+                end
+                table.insert(exact_list, exact_ip)
+                exact_set[exact_ip] = true
             end
         end
     end
@@ -746,12 +779,55 @@ local function compile_ip_rules(rules)
         ipv6_list = ipv6_list,
         glob_list = glob_list,
         exact_list = exact_list,
+        exact_set = exact_set,
+        shortcut_loopback_v4 = shortcut_loopback_v4,
+        shortcut_loopback_v6 = shortcut_loopback_v6,
+        shortcut_private_10 = shortcut_private_10,
+        shortcut_private_172 = shortcut_private_172,
+        shortcut_private_192 = shortcut_private_192,
     }
+end
+
+is_empty_ip_rule_compiled = function(compiled)
+    return compiled ~= nil
+        and #compiled.ipv4_ranges == 0
+        and #compiled.ipv6_list == 0
+        and #compiled.glob_list == 0
+        and #compiled.exact_list == 0
+end
+
+match_trusted_proxy_shortcut = function(compiled, remote)
+    if compiled == nil or remote == nil then
+        return nil
+    end
+    if remote == "127.0.0.1" then
+        return compiled.shortcut_loopback_v4 or nil
+    end
+    if remote == "::1" then
+        return compiled.shortcut_loopback_v6 or nil
+    end
+
+    local a, b = remote:match("^(%d+)%.(%d+)")
+    if not a then
+        return nil
+    end
+    a = tonumber(a)
+    b = tonumber(b)
+    if a == 10 then
+        return compiled.shortcut_private_10 or nil
+    end
+    if a == 172 and b and b >= 16 and b <= 31 then
+        return compiled.shortcut_private_172 or nil
+    end
+    if a == 192 and b == 168 then
+        return compiled.shortcut_private_192 or nil
+    end
+    return nil
 end
 
 --Get compiled IP rule cache for a rule file (TTL-based, recompiles on mtime change)
 --Returns compiled table or nil if file doesn't exist
-local function get_compiled_ip_rules(rulefilename)
+get_compiled_ip_rules = function(rulefilename)
     local entry = get_rule_entry(rulefilename)
     if entry == nil then return nil end
 
@@ -769,9 +845,8 @@ end
 
 --Match an IP against compiled IP rules (CIDR + wildcard + exact)
 --Returns true if match, false if no match, nil if rule file doesn't exist
-local function match_compiled_ip(compiled, ip)
+match_compiled_ip = function(compiled, ip)
     if compiled == nil or ip == nil then return nil end
-    local ip_lower = string.lower(ip)
 
     -- IPv4: binary search on pre-compiled sorted ranges
     if is_valid_ipv4(ip) then
@@ -792,16 +867,20 @@ local function match_compiled_ip(compiled, ip)
         end
     end
 
-    -- Check glob patterns (wildcards like 192.168.*)
-    for _, gregex in ipairs(compiled.glob_list) do
-        if rulematch(ip, gregex, "jo") then
+    -- Check exact IPs via hash lookup (O(1))
+    if compiled.exact_set then
+        local exact_key = ip
+        if is_valid_ipv6(ip) then
+            exact_key = string_lower(ip)
+        end
+        if compiled.exact_set[exact_key] then
             return true
         end
     end
 
-    -- Check exact IPs (case-insensitive via lowercase normalization)
-    for _, ex in ipairs(compiled.exact_list) do
-        if ip_lower == ex then
+    -- Check glob patterns (wildcards like 192.168.*)
+    for _, gregex in ipairs(compiled.glob_list) do
+        if rulematch(ip, gregex, "jo") then
             return true
         end
     end
@@ -831,8 +910,7 @@ is_cdn_ip = function(ip)
     -- cdnip.rule exists but has no valid rules (all commented/empty) = trust all
     -- This lets users keep an empty cdnip.rule without configuring any IPs,
     -- falling back to original behavior (trust XFF from any source)
-    if #compiled.ipv4_ranges == 0 and #compiled.ipv6_list == 0
-       and #compiled.glob_list == 0 and #compiled.exact_list == 0 then
+    if is_empty_ip_rule_compiled(compiled) then
         return nil
     end
     return match_compiled_ip(compiled, ip)
@@ -858,10 +936,20 @@ function match_rule_entry(entry, input, flags)
     -- Fast exit: no rules at all
     if entry.empty then return nil end
 
+    local cache_key = nil
+    if entry.cache_key and #input <= MATCH_CACHE_INPUT_MAX then
+        cache_key = entry.cache_key .. "|" .. (flags or "") .. "|" .. input
+        local cached = worker_match_cache[cache_key]
+        if cached ~= nil then
+            return cached or nil
+        end
+    end
+
     -- Engine 1: Fast plain-string matching (string.find, ~10x faster than regex)
     if entry.fast_hash then
         for _, rule in ipairs(entry.fast_rules) do
             if string.find(input, rule, 1, true) then
+                set_worker_match_cache(cache_key, rule)
                 return rule
             end
         end
@@ -877,11 +965,14 @@ function match_rule_entry(entry, input, flags)
             -- Slow path (attack detected): find which specific regex rule matched for logging
             for _, rule in ipairs(entry.regex_rules) do
                 if rulematch(input, rule, flags) then
+                      set_worker_match_cache(cache_key, rule)
                     return rule
                 end
             end
+              set_worker_match_cache(cache_key, "")
             return ""  -- combined matched but individual didn't (edge case)
         else
+              set_worker_match_cache(cache_key, false)
             return nil  -- genuine no-match, fast path clean
         end
     end
@@ -889,9 +980,11 @@ function match_rule_entry(entry, input, flags)
     -- Fallback: per-rule matching (when combined is nil or errored)
     for _, rule in ipairs(entry.regex_rules) do
         if rulematch(input, rule, flags) then
+              set_worker_match_cache(cache_key, rule)
             return rule
         end
     end
+      set_worker_match_cache(cache_key, false)
     return nil
 end
 

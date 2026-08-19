@@ -27,6 +27,7 @@ local table_insert = table.insert
 local table_concat = table.concat
 local string_sub = string.sub
 local string_char = string.char
+local string_lower = string.lower
 
 --Combined decode: recursive URL-decode + JS unicode/entity decode in one pass
 --FAST PATH: only runs decoders if their markers are present
@@ -179,20 +180,35 @@ local function white_url_check()
     if cfg("white_url_check") == "on" then
         local entry = get_rule_entry('whiteurl.rule')
         if entry == nil or entry.empty then return false end
-        local REQ_URI = var.request_uri
-        -- Check plain-string rules first (fast path, no regex)
-        if entry.fast_hash then
-            for _, rule in ipairs(entry.fast_rules) do
-                if string_find(REQ_URI, rule, 1, true) then
-                    return true
+        local REQ_PATH = var.uri or var.request_uri
+        local FULL_REQ_URI = var.request_uri
+
+        local function matches_whiteurl(target)
+            if target == nil then
+                return false
+            end
+            -- Check plain-string rules first (fast path, no regex)
+            if entry.fast_hash then
+                for _, rule in ipairs(entry.fast_rules) do
+                    if string_find(target, rule, 1, true) then
+                        return true
+                    end
                 end
             end
-        end
-        -- Fall back to regex for complex whitelist patterns
-        if entry.combined ~= nil then
-            if rulematch(REQ_URI, entry.combined, "joi") then
+            -- Fall back to regex for complex whitelist patterns
+            if entry.combined ~= nil and rulematch(target, entry.combined, "joi") then
                 return true
             end
+            return false
+        end
+
+        -- Path allowlist is the common case, so match URI path first.
+        if matches_whiteurl(REQ_PATH) then
+            return true
+        end
+        -- Preserve compatibility for existing rules that intentionally include query strings.
+        if FULL_REQ_URI ~= nil and FULL_REQ_URI ~= REQ_PATH and matches_whiteurl(FULL_REQ_URI) then
+            return true
         end
     end
 end
@@ -480,18 +496,24 @@ end
 -- Extract filenames from multipart Content-Disposition headers
 local function extract_filenames_from_multipart()
     local filenames = {}
+    local function append_filenames_from_data(data)
+        if data == nil or not string_find(data, "filename", 1, true) then
+            return
+        end
+        for m in re_gmatch(data, [[filename="([^"]*)"]], "ijo") do
+            if m[1] and m[1] ~= "" then table_insert(filenames, m[1]) end
+        end
+        for m in re_gmatch(data, [[filename=([^";\r\n]+)]], "ijo") do
+            if m[1] and m[1] ~= "" then table_insert(filenames, m[1]) end
+        end
+        for m in re_gmatch(data, [[filename\*=UTF-8''([^;\r\n]+)]], "ijo") do
+            if m[1] and m[1] ~= "" then table_insert(filenames, unescape(m[1])) end
+        end
+    end
     local body = req_get_body_data()
 
     if body then
-        for m in re_gmatch(body, [[filename="([^"]*)"]], "ijo") do
-            if m[1] and m[1] ~= "" then table_insert(filenames, m[1]) end
-        end
-        for m in re_gmatch(body, [[filename=([^";\r\n]+)]], "ijo") do
-            if m[1] and m[1] ~= "" then table_insert(filenames, m[1]) end
-        end
-        for m in re_gmatch(body, [[filename\*=UTF-8''([^;\r\n]+)]], "ijo") do
-            if m[1] and m[1] ~= "" then table_insert(filenames, unescape(m[1])) end
-        end
+        append_filenames_from_data(body)
         return filenames
     end
 
@@ -511,15 +533,7 @@ local function extract_filenames_from_multipart()
         total = total + #chunk
         local data = prev_tail .. chunk
 
-        for m in re_gmatch(data, [[filename="([^"]*)"]], "ijo") do
-            if m[1] and m[1] ~= "" then table_insert(filenames, m[1]) end
-        end
-        for m in re_gmatch(data, [[filename=([^";\r\n]+)]], "ijo") do
-            if m[1] and m[1] ~= "" then table_insert(filenames, m[1]) end
-        end
-        for m in re_gmatch(data, [[filename\*=UTF-8''([^;\r\n]+)]], "ijo") do
-            if m[1] and m[1] ~= "" then table_insert(filenames, unescape(m[1])) end
-        end
+        append_filenames_from_data(data)
 
         if #data > 512 then
             prev_tail = string_sub(data, -512)
@@ -579,9 +593,18 @@ local function post_attack_check()
         local ok = pcall(req_read_body)
         if not ok then return false end
         local CONTENT_TYPE = var.content_type
+        local content_type = CONTENT_TYPE and string_lower(CONTENT_TYPE) or nil
+        local is_form_urlencoded = content_type
+            and string_find(content_type, "application/x-www-form-urlencoded", 1, true) ~= nil
+        local should_parse_post_args = is_form_urlencoded
+        local waf_enabled = is_waf_enabled() == "on"
 
-        -- 1. Try form-encoded args (fast path)
-        local ok2, POST_ARGS, POST_ARGS_ERR = pcall(req_get_post_args)
+        -- 1. Parse key/value pairs only for form-urlencoded POSTs.
+        -- JSON/XML/plain-text bodies go straight to raw body scanning.
+        local ok2, POST_ARGS, POST_ARGS_ERR
+        if should_parse_post_args then
+            ok2, POST_ARGS, POST_ARGS_ERR = pcall(req_get_post_args)
+        end
         if ok2 and POST_ARGS ~= nil then
             for key, val in pairs(POST_ARGS) do
                 -- check parameter name (key)
@@ -595,7 +618,7 @@ local function post_attack_check()
                     end
                     if matched_key then
                         log_record('Deny_URL_POST', var.request_uri, "key:"..key, matched_key)
-                        if is_waf_enabled() == "on" then
+                        if waf_enabled then
                             waf_output()
                             return true
                         end
@@ -617,8 +640,8 @@ local function post_attack_check()
                         end
                     end
                     if matched then
-                        log_record('Deny_URL_POST', var.request_body, "-", matched)
-                        if is_waf_enabled() == "on" then
+                        log_record('Deny_URL_POST', var.request_uri, "-", matched)
+                        if waf_enabled then
                             waf_output()
                             return true
                         end
@@ -628,9 +651,7 @@ local function post_attack_check()
             -- application/x-www-form-urlencoded has already been fully inspected
             -- via parsed key/value pairs, so skip a second full-body scan
             -- unless OpenResty reported truncation.
-            if CONTENT_TYPE
-                and string_find(CONTENT_TYPE, "application/x%-www%-form%-urlencoded", 1)
-                and POST_ARGS_ERR ~= "truncated" then
+            if is_form_urlencoded and POST_ARGS_ERR ~= "truncated" then
                 return false
             end
         end
@@ -664,7 +685,7 @@ local function post_attack_check()
                         if matched then
                             log_record('Deny_URL_POST', var.request_uri, "-", matched)
                             f:close()
-                            if is_waf_enabled() == "on" then
+                            if waf_enabled then
                                 waf_output()
                             end
                             return true
@@ -690,7 +711,7 @@ local function post_attack_check()
             end
             if matched then
                 log_record('Deny_URL_POST', var.request_uri, "-", matched)
-                if is_waf_enabled() == "on" then
+                if waf_enabled then
                     waf_output()
                     return true
                 end

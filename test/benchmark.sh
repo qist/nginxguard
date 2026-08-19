@@ -1,7 +1,42 @@
 #!/bin/bash
-# NginxGuard 全场景压测 — 在 192.168.2.180 上本地执行
+# NginxGuard 全场景压测
+# 默认在本机执行；如设置 BENCH_REMOTE_HOST=192.168.2.180，
+# 则脚本会自动上传最新 access.lua/lib.lua/benchmark.sh 到远端，
+# 替换远端 WAF 文件、校验并重启 nginx 后，再在远端本机执行压测。
 # 50000请求 200并发, 每场景3次取最佳值, ab + ps/top 监控
+# 为避免口径混乱，GET / form POST / JSON POST 分组分别对比。
 # 参考 waf_bench3.sh 的采样方式 (ps aux RSS + top CPU)
+
+REMOTE_HOST="${BENCH_REMOTE_HOST:-}"
+REMOTE_TMP_SCRIPT="/tmp/benchmark_remote.$$.$RANDOM.sh"
+REMOTE_TMP_ACCESS="/tmp/access_bench.$$.$RANDOM.lua"
+REMOTE_TMP_LIB="/tmp/lib_bench.$$.$RANDOM.lua"
+REMOTE_WAF_DIR="/opt/nginx/lua/waf"
+REMOTE_NGINX_HOME="/opt/nginx"
+
+if [ -n "$REMOTE_HOST" ] && [ "${BENCH_REMOTE_MODE:-0}" != "1" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+    LOCAL_SCRIPT="$SCRIPT_DIR/benchmark.sh"
+    LOCAL_ACCESS="$REPO_ROOT/access.lua"
+    LOCAL_LIB="$REPO_ROOT/lib.lua"
+    scp -o StrictHostKeyChecking=no "$LOCAL_SCRIPT" "${REMOTE_HOST}:${REMOTE_TMP_SCRIPT}" || exit 1
+    scp -o StrictHostKeyChecking=no "$LOCAL_ACCESS" "${REMOTE_HOST}:${REMOTE_TMP_ACCESS}" || exit 1
+    scp -o StrictHostKeyChecking=no "$LOCAL_LIB" "${REMOTE_HOST}:${REMOTE_TMP_LIB}" || exit 1
+    ssh -o StrictHostKeyChecking=no "$REMOTE_HOST" "\
+        install -m 644 '$REMOTE_TMP_ACCESS' '$REMOTE_WAF_DIR/access.lua' && \
+        install -m 644 '$REMOTE_TMP_LIB' '$REMOTE_WAF_DIR/lib.lua' && \
+        cd '$REMOTE_NGINX_HOME' && ./nginx -p '$REMOTE_NGINX_HOME/' -c conf/nginx.conf -t && \
+        ./nginx -p '$REMOTE_NGINX_HOME/' -c conf/nginx.conf -s stop 2>/dev/null || kill -TERM \$(cat '$REMOTE_NGINX_HOME/logs/nginx.pid' 2>/dev/null) 2>/dev/null || true; \
+        sleep 1; \
+        cd '$REMOTE_NGINX_HOME' && ./nginx -p '$REMOTE_NGINX_HOME/' -c conf/nginx.conf >/dev/null 2>&1; \
+        sleep 1; \
+        chmod +x '$REMOTE_TMP_SCRIPT' && BENCH_REMOTE_MODE=1 '$REMOTE_TMP_SCRIPT'; \
+        status=\$?; \
+        rm -f '$REMOTE_TMP_SCRIPT' '$REMOTE_TMP_ACCESS' '$REMOTE_TMP_LIB'; \
+        exit \$status"
+    exit $?
+fi
 
 NGINX_HOME="/opt/nginx"
 NGINX_BIN="$NGINX_HOME/./nginx"
@@ -15,7 +50,8 @@ RESULT_FILE="/tmp/bench_nginxguard.txt"
 AB_OUT="/tmp/ab_out_bench.$$"
 AB_STATS="/tmp/ab_stats_bench.$$.csv"
 BENCH_DATA_FILE="/tmp/bench_data.$$"
-POST_DATA_FILE="/tmp/post_data.$$"
+FORM_POST_DATA_FILE="/tmp/post_form_data.$$"
+JSON_POST_DATA_FILE="/tmp/post_json_data.$$"
 WAF_CONFIG_BAK="${WAF_CONFIG}.prod.$$"
 NGINX_CONF_BAK="${NGINX_CONF}.bak.$$"
 CLEANED_UP=0
@@ -65,7 +101,7 @@ cleanup() {
         rm -f "$WAF_CONFIG_BAK"
     fi
     restore_nginx_conf
-    rm -f "$AB_OUT" "$AB_STATS" "$BENCH_DATA_FILE" "$POST_DATA_FILE"
+    rm -f "$AB_OUT" "$AB_STATS" "$BENCH_DATA_FILE" "$FORM_POST_DATA_FILE" "$JSON_POST_DATA_FILE"
     restart_nginx >/dev/null 2>&1 || true
 }
 
@@ -83,8 +119,8 @@ run_bench() {
         sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
         sleep 1
 
-        # 预热
-        ab -n 1000 -c 50 -k -H "$UA" http://127.0.0.1/ >/dev/null 2>&1
+        # 预热：使用与正式压测相同的请求类型，避免 GET 预热 POST 场景
+        ab -n 1000 -c 50 -k -H "$UA" "$@" "$TARGET" >/dev/null 2>&1
 
         # ab 压测在后台跑, 同时采样 CPU
         ab -n $REQUESTS -c $CONCURRENCY -k -e "$AB_STATS" -H "$UA" "$@" "$TARGET" > "$AB_OUT" 2>&1 &
@@ -127,52 +163,80 @@ echo "========================================" | tee -a $RESULT_FILE
 echo "  NginxGuard 全场景压测" | tee -a $RESULT_FILE
 echo "  $(date '+%Y-%m-%d %H:%M:%S')" | tee -a $RESULT_FILE
 echo "  Requests=$REQUESTS Concurrency=$CONCURRENCY KeepAlive" | tee -a $RESULT_FILE
+echo "  对比口径: GET / form POST / JSON POST 各自独立" | tee -a $RESULT_FILE
 echo "========================================" | tee -a $RESULT_FILE
 echo "" | tee -a $RESULT_FILE
-  > "$BENCH_DATA_FILE"
+> "$BENCH_DATA_FILE"
 
 # POST data
-  echo "test=hello_world_data_padding_padding_padding" > "$POST_DATA_FILE"
+echo "test=hello_world_data_padding_padding_padding" > "$FORM_POST_DATA_FILE"
+cat > "$JSON_POST_DATA_FILE" <<'EOF'
+{"message":"hello_world_data_padding_padding_padding","id":123,"tags":["bench","json","post"]}
+EOF
 
 # 备份原始配置
 prepare_nginx_conf
-  cp $WAF_CONFIG $WAF_CONFIG_BAK
+cp $WAF_CONFIG $WAF_CONFIG_BAK
 
-# 场景 A: WAF 全关（基线）— lua_package_path 等保留不动, 仅 config_waf_enable=off
-echo "######## A: WAF 全关（基线）########" | tee -a $RESULT_FILE
-  cp $WAF_CONFIG_BAK $WAF_CONFIG
+echo "======== GET 场景 ========" | tee -a $RESULT_FILE
+# 场景 A: GET 基线
+echo "######## A: GET 基线（WAF 全关）########" | tee -a $RESULT_FILE
+cp $WAF_CONFIG_BAK $WAF_CONFIG
 set_config "waf_enable" "off"
 restart_nginx
-  run_bench "A-baseline"
+run_bench "A-baseline-get"
 
-# 场景 B: WAF 全开（无 CC/POST）
-echo "######## B: WAF 全开（无 CC）########" | tee -a $RESULT_FILE
-  cp $WAF_CONFIG_BAK $WAF_CONFIG
+# 场景 B: GET + WAF（无 CC/POST）
+echo "######## B: GET + WAF（无 CC/POST）########" | tee -a $RESULT_FILE
+cp $WAF_CONFIG_BAK $WAF_CONFIG
 set_config "cc_check" "off"
 set_config "post_check" "off"
 set_config "cc_rate" "99999/60"
 restart_nginx
-  run_bench "B-noCC"
+run_bench "B-get-noCC-noPOST"
 
-# 场景 C: WAF + CC（POST 关闭）
-echo "######## C: WAF + CC ########" | tee -a $RESULT_FILE
-  cp $WAF_CONFIG_BAK $WAF_CONFIG
+# 场景 C: GET + WAF + CC（POST 关闭）
+echo "######## C: GET + WAF + CC ########" | tee -a $RESULT_FILE
+cp $WAF_CONFIG_BAK $WAF_CONFIG
 set_config "post_check" "off"
 restart_nginx
-  run_bench "C-withCC"
+run_bench "C-get-withCC"
 
-# 场景 D: WAF + POST（CC 关闭）
-echo "######## D: WAF + POST ########" | tee -a $RESULT_FILE
-  cp $WAF_CONFIG_BAK $WAF_CONFIG
+# 场景 D: GET + WAF 全开（生产）
+echo "######## D: GET + WAF 全开（生产）########" | tee -a $RESULT_FILE
+cp $WAF_CONFIG_BAK $WAF_CONFIG
+restart_nginx
+run_bench "D-get-production"
+
+echo "======== Form POST 场景 ========" | tee -a $RESULT_FILE
+# 场景 E: form POST 基线
+echo "######## E: form POST 基线（WAF 全关）########" | tee -a $RESULT_FILE
+cp $WAF_CONFIG_BAK $WAF_CONFIG
+set_config "waf_enable" "off"
+restart_nginx
+run_bench "E-form-post-baseline" -p "$FORM_POST_DATA_FILE" -T application/x-www-form-urlencoded
+
+# 场景 F: form POST + WAF（CC 关闭）
+echo "######## F: form POST + WAF（CC 关闭）########" | tee -a $RESULT_FILE
+cp $WAF_CONFIG_BAK $WAF_CONFIG
 set_config "cc_check" "off"
 restart_nginx
-  run_bench "D-withPOST" -p "$POST_DATA_FILE" -T application/x-www-form-urlencoded
+run_bench "F-form-post-withWAF" -p "$FORM_POST_DATA_FILE" -T application/x-www-form-urlencoded
 
-# 场景 E: WAF 全开（生产配置）
-echo "######## E: WAF 全开（生产）########" | tee -a $RESULT_FILE
-  cp $WAF_CONFIG_BAK $WAF_CONFIG
+echo "======== JSON POST 场景 ========" | tee -a $RESULT_FILE
+# 场景 G: JSON POST 基线
+echo "######## G: JSON POST 基线（WAF 全关）########" | tee -a $RESULT_FILE
+cp $WAF_CONFIG_BAK $WAF_CONFIG
+set_config "waf_enable" "off"
 restart_nginx
-  run_bench "E-production" -p "$POST_DATA_FILE" -T application/x-www-form-urlencoded
+run_bench "G-json-post-baseline" -p "$JSON_POST_DATA_FILE" -T application/json
+
+# 场景 H: JSON POST + WAF（CC 关闭）
+echo "######## H: JSON POST + WAF（CC 关闭）########" | tee -a $RESULT_FILE
+cp $WAF_CONFIG_BAK $WAF_CONFIG
+set_config "cc_check" "off"
+restart_nginx
+run_bench "H-json-post-withWAF" -p "$JSON_POST_DATA_FILE" -T application/json
 
 echo "========================================" | tee -a $RESULT_FILE
 echo "  压测完成: $(date)" | tee -a $RESULT_FILE

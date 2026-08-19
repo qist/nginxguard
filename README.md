@@ -627,7 +627,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 | 内存 | 24 GB |
 | OS | Linux 5.14 (RHEL 9) |
 | Nginx | 1.31.3 + LuaJIT2 (OpenResty 分支) |
-| 全场景压测 | 200 并发，50000 请求，Keep-Alive |
+| 全场景压测 | 200 并发，50000 请求，Keep-Alive（GET / form POST / JSON POST 分组对比） |
 | `trust_proxy_headers` 对比 | 100 并发，30000 请求，Keep-Alive |
 | 测试工具 | ApacheBench (ab) + `ps`/`top` 实时采样 |
 | 测试方法 | 每场景 3 次取最佳值，避免系统波动干扰 |
@@ -651,25 +651,42 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 | Cookie 检测后移 | Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即短路返回 |
 | **is_cdn_ip 缓存** | `trust_proxy_headers=on` 时，`is_cdn_ip()` 结果缓存到 `ngx.ctx._is_cdn`，避免同请求内重复 CIDR 匹配 |
 | **内网 IP 快速短路** | 127.x/10.x/172.x/192.x 开头的 `remote_addr` 跳过 37 条 CIDR 二分查找，O(1) 判定 |
-| **headers 缓存** | `ngx.req.get_headers()` 结果缓存到 `ngx.ctx._headers`，避免重复构建请求头 table |
+| **代理头直读** | `CF-Connecting-IP` / `X-Real-IP` / `X-Forwarded-For` 直接读 `ngx.var.http_*`，避免构造整张 headers table |
 | **UA bloom-filter 预检查** | `is_white_ua()` 先检查 7 个 bot 标记词（bot/spider/crawl 等），99% 正常流量跳过 50 次 `string.find` |
 | **url_args 无参数短路** | `next(REQ_ARGS) == nil` 时直接返回，跳过 `pairs()` 循环和正则匹配 |
 | **最小输入长度检查** | `match_any_rule` 中 `#input < 2` 直接返回 nil，避免对短参数做正则匹配 |
 | **filepath 字符串缓存** | `get_rule_entry` 缓存 `config_rule_dir .. '/' .. rulefilename` 到 worker 级变量，避免每请求字符串拼接 |
+| **POST Content-Type 分流** | `application/x-www-form-urlencoded` 才走 `get_post_args()`；JSON/XML/plain body 直接走原始 body 扫描 |
+| **规则匹配缓存** | 小体积请求体/参数按 `规则文件 + mtime + flags + input` 做 worker 级缓存，重复请求直接复用匹配结果 |
 
 ### 测试结果
 
 #### 全场景压测（`test/benchmark.sh`）
 
-| 场景 | 请求类型 | req/s | CPU | RSS | P99 | 吞吐下降 |
-|------|----------|-------|-----|-----|-----|---------|
-| NginxGuard 全关（基线） | GET | 26,271 | 300% | 166 MB | 32ms | — |
-| NginxGuard 全开（无 CC/POST） | GET | 19,438 | 326% | 174 MB | 37ms | 26.0% |
-| NginxGuard + CC（POST 关闭） | GET | 21,090 | 290% | 172 MB | 61ms | 19.7% |
-| NginxGuard + POST（CC 关闭） | POST | 13,063 | 317% | 176 MB | 55ms | — |
-| NginxGuard 全开（生产） | POST | 20,758 | 313% | 174 MB | 40ms | — |
+##### GET
 
-> `吞吐下降` 仅对同为 `GET` 的场景与 GET 基线计算。`POST` 场景因为请求类型不同，不直接与 GET 基线做百分比对比。
+| 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
+|------|-------|-----|-----|-----|---------|
+| GET 基线（WAF 全关） | 25,712 | 298% | 166 MB | 47ms | — |
+| GET + WAF（无 CC/POST） | 20,053 | 300% | 174 MB | 67ms | 22.0% |
+| GET + WAF + CC | 21,407 | 290% | 172 MB | 35ms | 16.7% |
+| GET + WAF 全开（生产） | 20,504 | 298% | 172 MB | 94ms | 20.3% |
+
+##### form POST
+
+| 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
+|------|-------|-----|-----|-----|---------|
+| form POST 基线（WAF 全关） | 27,362 | 295% | 168 MB | 30ms | — |
+| form POST + WAF（CC 关闭） | 18,680 | 294% | 184 MB | 42ms | 31.7% |
+
+##### JSON POST
+
+| 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
+|------|-------|-----|-----|-----|---------|
+| JSON POST 基线（WAF 全关） | 26,795 | 284% | 168 MB | 68ms | — |
+| JSON POST + WAF（CC 关闭） | 19,843 | 329% | 182 MB | 72ms | 26.0% |
+
+> `吞吐下降` 仅在同一请求类型内计算，不再拿 GET 基线直接对比 POST 场景。
 
 #### trust_proxy_headers 性能对比
 
@@ -682,7 +699,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 | `trust_proxy_headers=on` + cdnip.rule + XFF | 17,713 | 5.645ms | 25ms | 模拟真实 CDN 透传 `X-Forwarded-For` |
 | `trust_proxy_headers=on` + 无 cdnip.rule + XFF | 17,060 | 5.862ms | 27ms | 无 CDN 校验时 XFF 场景仍更重 |
 
-> **结论**：按 2026-08-19 在 `192.168.2.180` 的实测结果，NginxGuard 在 GET 常规流量下，全开但关闭 CC/POST 时吞吐下降约 **26%**；开启 CC 后吞吐下降约 **20%**。POST 场景在本轮优化后提升到 **13,063 req/s**，较上一版记录的 10,981 req/s 有明显改善。关键优化措施：
+> **结论**：按 2026-08-19 在 `192.168.2.180` 的最新实测结果，NginxGuard 在 GET 常规流量下，全开但关闭 CC/POST 时吞吐下降约 **22%**；开启 CC 后吞吐下降约 **17%**。本轮进一步优化后，`form POST + WAF` 提升到 **18,680 req/s**，`JSON POST + WAF` 提升到 **19,843 req/s**，相比上一轮分别从 **13,122 req/s** 和 **10,834 req/s** 明显抬升。关键优化措施：
 >
 > 1. **请求类型短路**：GET/HEAD/OPTIONS/DELETE 跳过 POST 和文件上传检测，避免无意义的 body 读取
 > 2. **规则双引擎**：纯字符串规则用 `string.find`（快 10 倍），正则规则用合并 `ngx.re.find`，减少正则引擎负载
@@ -693,11 +710,11 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 > 7. **Cookie 检测后移**：Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即可短路返回
 > 8. **is_cdn_ip 请求级缓存**：`trust_proxy_headers=on` 时缓存 CDN IP 匹配结果，避免重复 CIDR 二分查找
 > 9. **内网 IP 快速短路**：127.x/10.x/172.x/192.x 跳过完整 CIDR 匹配，O(1) 判定
-> 10. **UA bloom-filter 预检查**：7 个 bot 标记词预过滤，99% 正常流量跳过 50 次 string.find
-> 11. **url_args 无参数短路**：无查询参数时直接返回，跳过 pairs() 循环和正则匹配
-> 12. **最小输入长度检查**：输入 < 2 字符直接跳过规则匹配，避免无谓的正则执行
+> 10. **代理头直读**：直接读取 `ngx.var.http_cf_connecting_ip` / `http_x_real_ip` / `http_x_forwarded_for`，减少 headers table 分配
+> 11. **POST Content-Type 分流**：表单请求才走 `get_post_args()`，JSON/XML/plain body 直接按原始 body 扫描
+> 12. **规则匹配缓存**：重复的小体积参数/body 按 `mtime + flags + input` 复用匹配结果，显著降低 POST 热路径正则成本
 >
-> 这轮实测里，`trust_proxy_headers=on` + `cdnip.rule` 相比 `off` 仍有额外开销，但明显优于“无 `cdnip.rule` 时无条件信任 XFF”的路径；生产环境依然建议保留 CDN IP 校验。CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。内存增加约 8MB（规则缓存 + 共享字典）。
+> 这轮实测里，`trust_proxy_headers=on` + `cdnip.rule` 相比 `off` 仍有额外开销，但明显优于“无 `cdnip.rule` 时无条件信任 XFF”的路径；生产环境依然建议保留 CDN IP 校验。CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。新增的 worker 级匹配缓存主要把收益打在重复参数和重复 body 的 POST 热路径上。
 
 ---
 
