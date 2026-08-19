@@ -140,7 +140,7 @@ waf/
 | 字段 | 说明 | 对应 config.lua 变量 |
 |------|------|---------------------|
 | `waf_enable` | NginxGuard 总开关 | `config_waf_enable` |
-| `trust_proxy_headers` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=NginxGuard 在 CDN/反代后，根据 `cdnip.rule` 判断是否信任转发头：`remote_addr` 在 `cdnip.rule` 中才信任 XFF，不在则用 `remote_addr` 防伪造；`cdnip.rule` 不存在或为空则信任所有 XFF。`"off"`=NginxGuard 直接暴露公网，只用 `remote_addr` 防伪造 | `config_trust_proxy_headers` |
+| `trust_proxy_headers` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=NginxGuard 在 CDN/反代后，根据 `cdnip.rule` 判断是否信任转发头：`remote_addr` 在 `cdnip.rule` 中才信任 XFF，不在则用 `remote_addr` 防伪造；`cdnip.rule` 不存在或为空则信任所有 XFF（原始方案，存在伪造风险）。`"off"`=NginxGuard 直接暴露公网，只用 `remote_addr` 防伪造 | `config_trust_proxy_headers` |
 | `white_url_check` | 白名单 URL 检测 | `config_white_url_check` |
 | `white_ua_check` | 白名单 UA 检测（搜索引擎爬虫放行，仅跳过 UA 黑名单检测，不影响 URL/POST/CC 等其他检测） | `config_white_ua_check` |
 | `white_ip_check` | 白名单 IP 检测 | `config_white_ip_check` |
