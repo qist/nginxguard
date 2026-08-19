@@ -627,7 +627,8 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 | 内存 | 24 GB |
 | OS | Linux 5.14 (RHEL 9) |
 | Nginx | 1.31.3 + LuaJIT2 (OpenResty 分支) |
-| 并发 | 200 并发，50000 请求，Keep-Alive |
+| 全场景压测 | 200 并发，50000 请求，Keep-Alive |
+| `trust_proxy_headers` 对比 | 100 并发，30000 请求，Keep-Alive |
 | 测试工具 | ApacheBench (ab) + `ps`/`top` 实时采样 |
 | 测试方法 | 每场景 3 次取最佳值，避免系统波动干扰 |
 
@@ -658,24 +659,30 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 
 ### 测试结果
 
-| 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
-|------|-------|-----|-----|-----|---------|
-| NginxGuard 全关（基线） | 25,550 | 296% | 166 MB | 29ms | — |
-| NginxGuard 全开（无 CC/POST） | 19,739 | 320% | 173 MB | 39ms | 22.7% |
-| NginxGuard + CC（POST 关闭） | 21,445 | 313% | 172 MB | 38ms | — |
-| NginxGuard + POST（CC 关闭） | 10,981 | 315% | 174 MB | 64ms | — |
-| NginxGuard 全开（生产） | 20,985 | 310% | 173 MB | 34ms | 17.9% |
+#### 全场景压测（`test/benchmark.sh`）
+
+| 场景 | 请求类型 | req/s | CPU | RSS | P99 | 吞吐下降 |
+|------|----------|-------|-----|-----|-----|---------|
+| NginxGuard 全关（基线） | GET | 26,271 | 300% | 166 MB | 32ms | — |
+| NginxGuard 全开（无 CC/POST） | GET | 19,438 | 326% | 174 MB | 37ms | 26.0% |
+| NginxGuard + CC（POST 关闭） | GET | 21,090 | 290% | 172 MB | 61ms | 19.7% |
+| NginxGuard + POST（CC 关闭） | POST | 13,063 | 317% | 176 MB | 55ms | — |
+| NginxGuard 全开（生产） | POST | 20,758 | 313% | 174 MB | 40ms | — |
+
+> `吞吐下降` 仅对同为 `GET` 的场景与 GET 基线计算。`POST` 场景因为请求类型不同，不直接与 GET 基线做百分比对比。
 
 #### trust_proxy_headers 性能对比
 
-| 场景 | req/s | TPR | 说明 |
-|------|-------|-----|------|
-| WAF 全关（基线） | 25,550 | 7.83ms | 无 Lua 开销 |
-| `trust_proxy_headers=off` | 18,254 | 5.48ms | 仅用 remote_addr，无 XFF 解析 |
-| `trust_proxy_headers=on` + cdnip.rule | 20,582 | 5.49ms | 优化后已接近 off 水平 |
-| `trust_proxy_headers=on` + 无 cdnip.rule | 18,221 | 5.49ms | 无条件信任 XFF |
+| 场景 | req/s | TPR | P99 | 说明 |
+|------|-------|-----|-----|------|
+| WAF 全关（基线） | 24,366 | 4.104ms | 27ms | 无 Lua 开销 |
+| `trust_proxy_headers=off` | 19,254 | 5.194ms | 25ms | 仅用 `remote_addr`，无 XFF 解析 |
+| `trust_proxy_headers=on` + cdnip.rule | 18,341 | 5.452ms | 20ms | 校验来源代理是否命中 CDN IP 列表 |
+| `trust_proxy_headers=on` + 无 cdnip.rule | 17,028 | 5.873ms | 33ms | 无条件信任 XFF，性能和安全性都更差 |
+| `trust_proxy_headers=on` + cdnip.rule + XFF | 17,713 | 5.645ms | 25ms | 模拟真实 CDN 透传 `X-Forwarded-For` |
+| `trust_proxy_headers=on` + 无 cdnip.rule + XFF | 17,060 | 5.862ms | 27ms | 无 CDN 校验时 XFF 场景仍更重 |
 
-> **结论**：经过多轮深度优化后，NginxGuard 全开（生产配置）相比全关的吞吐下降稳定在 **18%** 左右。关键优化措施：
+> **结论**：按 2026-08-19 在 `192.168.2.180` 的实测结果，NginxGuard 在 GET 常规流量下，全开但关闭 CC/POST 时吞吐下降约 **26%**；开启 CC 后吞吐下降约 **20%**。POST 场景在本轮优化后提升到 **13,063 req/s**，较上一版记录的 10,981 req/s 有明显改善。关键优化措施：
 >
 > 1. **请求类型短路**：GET/HEAD/OPTIONS/DELETE 跳过 POST 和文件上传检测，避免无意义的 body 读取
 > 2. **规则双引擎**：纯字符串规则用 `string.find`（快 10 倍），正则规则用合并 `ngx.re.find`，减少正则引擎负载
@@ -690,8 +697,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 > 11. **url_args 无参数短路**：无查询参数时直接返回，跳过 pairs() 循环和正则匹配
 > 12. **最小输入长度检查**：输入 < 2 字符直接跳过规则匹配，避免无谓的正则执行
 >
-> `trust_proxy_headers=on` + cdnip.rule 的性能开销已从 -10% 降低到接近 0%（与 off 持平）。
-> CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。内存增加约 7MB（规则缓存 + 共享字典）。
+> 这轮实测里，`trust_proxy_headers=on` + `cdnip.rule` 相比 `off` 仍有额外开销，但明显优于“无 `cdnip.rule` 时无条件信任 XFF”的路径；生产环境依然建议保留 CDN IP 校验。CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。内存增加约 8MB（规则缓存 + 共享字典）。
 
 ---
 
@@ -706,11 +712,11 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
        ↓
 3. white_ip_check     → 白名单 IP 放行
        ↓
-4. white_url_check    → 白名单 URL 放行
+4. dynamic_black_ip   → 动态黑名单（CC 自动拉黑期内）
        ↓
-5. dynamic_black_ip   → 动态黑名单（CC 自动拉黑期内）
+5. black_ip_check     → 静态黑名单 IP
        ↓
-6. black_ip_check     → 静态黑名单 IP
+6. white_url_check    → 白名单 URL 放行
        ↓
 7. user_agent_check   → User-Agent 攻击（白名单 UA 跳过此项）
        ↓
