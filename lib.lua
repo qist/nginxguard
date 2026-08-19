@@ -497,16 +497,27 @@ local function read_rule_file(filepath)
     -- building a combined regex from CIDR strings (e.g. 1.180.27.0/24) is useless and wasteful
     local is_cdnip = filepath:match("cdnip%.rule$")
     local parts = {}
+    -- Dual-engine: separate plain-string rules (fast: string.find) from regex rules
+    -- Plain rules have NO regex metacharacters: ( ) [ ] { } . * + ? ^ $ | \
+    -- These can be matched with string.find (plain mode) which is ~10x faster than regex
+    local fast_rules = {}
+    local regex_rules = {}
     if not is_cdnip then
         for _, r in ipairs(t) do
             if r ~= "" then
+                -- Check if rule contains regex metacharacters
+                if r:find("[()%.%[%]%*%+%?%^%$|\\]") then
+                    table.insert(regex_rules, r)
+                else
+                    table.insert(fast_rules, r)
+                end
                 table.insert(parts, r)
             end
         end
     end
     local combined = nil
-    if #parts > 0 then
-        combined = "(?:" .. table.concat(parts, "|") .. ")"
+    if #regex_rules > 0 then
+        combined = "(?:" .. table.concat(regex_rules, "|") .. ")"
     end
 
     -- Pre-compile glob patterns (for IP rules like 192.168.*)
@@ -522,7 +533,7 @@ local function read_rule_file(filepath)
 
     worker_rule_cache[filepath] = {
         mtime = current_mtime, rules = t, combined = combined,
-        glob_compiled = glob_compiled, last_check = now
+        fast_rules = fast_rules, glob_compiled = glob_compiled, last_check = now
     }
     return t
 end
@@ -759,16 +770,24 @@ end
 
 --Fast match: check if input matches ANY rule in a rule file
 --Returns the matched rule string (for logging), or nil if no match
---Uses combined alternation pattern for O(1) regex match on normal traffic
+--Dual-engine: fast string.find for plain rules + combined regex for regex rules
 function match_any_rule(rulefilename, input, flags)
     local entry = get_rule_entry(rulefilename)
     if entry == nil then return nil end
-    -- Fast path: single combined regex match (covers 99%+ of normal traffic)
+
+    -- Engine 1: Fast plain-string matching (string.find, ~10x faster than regex)
+    -- Only runs if the rule file has plain-string rules
+    if entry.fast_rules and #entry.fast_rules > 0 then
+        for _, rule in ipairs(entry.fast_rules) do
+            if string.find(input, rule, 1, true) then
+                return rule
+            end
+        end
+    end
+
+    -- Engine 2: Combined regex matching (ngx.re.find)
+    -- Only runs if the rule file has regex rules
     if entry.combined ~= nil then
-        -- Use multi-return form to detect regex compile errors.
-        -- ngx.re.find returns (from, to, err); on compile error from=nil and err is set.
-        -- A compile error must NOT be treated as "no match" (fail-open); fall back to
-        -- per-rule matching so a single bad rule does not silently disable the whole file.
         local from, _, err = rulematch(input, entry.combined, flags)
         if err then
             ngx.log(ngx.ERR, "[NginxGuard] rule file '", rulefilename,
@@ -786,7 +805,8 @@ function match_any_rule(rulefilename, input, flags)
             return nil  -- genuine no-match, fast path clean
         end
     end
-    -- Fallback: per-rule matching (also used when combined is nil or errored above)
+
+    -- Fallback: per-rule matching (when combined is nil or errored)
     for _, rule in ipairs(entry.rules) do
         if rule ~= "" and rulematch(input, rule, flags) then
             return rule
