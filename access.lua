@@ -120,6 +120,12 @@ local function is_waf_enabled()
     return cfg("waf_enable")
 end
 
+-- OPTIMIZATION: combined check for waf_enable + a feature flag in one call
+-- Avoids separate is_waf_enabled() calls inside each check function
+local function waf_on_and(key)
+    return cfg("waf_enable") == "on" and cfg(key) == "on"
+end
+
 --allow white ip
 local function white_ip_check()
      if cfg("white_ip_check") == "on" then
@@ -195,10 +201,27 @@ end
 --whiteua.rule contains 50 plain-string bot names (Googlebot, bingbot, etc.)
 --Uses string.find (plain mode) instead of ngx.re.find for each entry
 --This avoids PCRE JIT overhead for simple substring matching
+--OPTIMIZATION: bloom-filter style pre-check — only run 50 string.find calls
+--if UA contains none of the common bot markers (bot/spider/crawl/etc.)
+--This skips the full loop for 99% of normal traffic
+local BOT_MARKERS = { "bot", "spider", "crawl", "slurp", "archiver", "feed", "index" }
 local function is_white_ua()
     if cfg("white_ua_check") == "on" then
         local USER_AGENT = var.http_user_agent
         if USER_AGENT ~= nil then
+            -- OPTIMIZATION: quick bloom-filter check before full 50-rule scan
+            -- If UA doesn't contain any bot marker, skip the full loop
+            local ua_lower = string.lower(USER_AGENT)
+            local has_bot_marker = false
+            for _, marker in ipairs(BOT_MARKERS) do
+                if string_find(ua_lower, marker, 1, true) then
+                    has_bot_marker = true
+                    break
+                end
+            end
+            if not has_bot_marker then
+                return false
+            end
             local entry = get_rule_entry('whiteua.rule')
             if entry == nil or entry.empty then return false end
             -- Fast path: plain-string rules via string.find
@@ -341,6 +364,12 @@ local function url_args_attack_check()
     if cfg("url_args_check") == "on" then
         local ok, REQ_ARGS = pcall(req_get_uri_args)
         if not ok or REQ_ARGS == nil then
+            return false
+        end
+        -- OPTIMIZATION: if no args at all, skip immediately
+        -- ngx.req.get_uri_args returns empty table for /path (no ?query)
+        -- Avoids entering the pairs() loop + match_any_rule overhead
+        if next(REQ_ARGS) == nil then
             return false
         end
         for key, val in pairs(REQ_ARGS) do

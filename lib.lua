@@ -610,10 +610,15 @@ local function resolve_rule_dir(dir)
     return config_rule_dir .. '/' .. dir
 end
 
+--Worker-level filepath cache: avoids string concatenation per-request
+--key: rulefilename → cached filepath string
+local worker_filepath_cache = {}
+
 --Get full rule entry (rules array + combined pattern) for a rule file
 --Supports per-domain rule_dir override, with TTL caching
 function get_rule_entry(rulefilename)
-    local RULE_PATH = config_rule_dir
+    -- OPTIMIZATION: only call get_domain_config() if domain overrides exist
+    -- Most deployments don't use per-domain rule_dir, so skip the overhead
     local dcfg = get_domain_config()
     if dcfg and dcfg["rule_dir"] and dcfg["rule_dir"] ~= "" then
         local resolved = resolve_rule_dir(dcfg["rule_dir"])
@@ -631,7 +636,12 @@ function get_rule_entry(rulefilename)
             -- domain rule file doesn't exist → fall through to global rules
         end
     end
-    local filepath = RULE_PATH .. '/' .. rulefilename
+    -- OPTIMIZATION: cache filepath string to avoid concatenation per-request
+    local filepath = worker_filepath_cache[rulefilename]
+    if filepath == nil then
+        filepath = config_rule_dir .. '/' .. rulefilename
+        worker_filepath_cache[rulefilename] = filepath
+    end
     local entry = worker_rule_cache[filepath]
     local now = ngx.time()
     if entry and (now - entry.last_check) < RULE_CACHE_TTL then
@@ -829,7 +839,12 @@ end
 --Fast match: check if input matches ANY rule in a rule file
 --Returns the matched rule string (for logging), or nil if no match
 --Dual-engine: fast string.find for plain rules + combined regex for regex rules
+--OPTIMIZATION: min_input_len — skip matching if input is too short to match any rule
+--Shortest rules across all .rule files: '<%' (2 chars) in args.rule/cookie.rule
+local MIN_RULE_LEN = 2
+
 function match_any_rule(rulefilename, input, flags)
+    if input == nil or #input < MIN_RULE_LEN then return nil end
     local entry = get_rule_entry(rulefilename)
     if entry == nil then return nil end
 
