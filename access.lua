@@ -123,6 +123,7 @@ end
 --allow white ip
 local function white_ip_check()
      if cfg("white_ip_check") == "on" then
+        -- OPTIMIZATION: get_client_ip() is cached in ngx.ctx after first call
         if match_ip_rule('whiteip.rule', get_client_ip()) then
             return true
         end
@@ -132,6 +133,7 @@ end
 --deny black ip (static blacklist from blackip.rule)
 local function black_ip_check()
      if cfg("black_ip_check") == "on" then
+        -- OPTIMIZATION: get_client_ip() is cached in ngx.ctx after first call
         if match_ip_rule('blackip.rule', get_client_ip()) then
             log_record('BlackList_IP',var.request_uri,"_","_")
             if is_waf_enabled() == "on" then
@@ -152,6 +154,7 @@ local function dynamic_black_ip_check()
     if badGuys == nil then
         return false
     end
+    -- OPTIMIZATION: get_client_ip() is cached in ngx.ctx after first call
     local CLIENT_IP = get_client_ip()
     if badGuys:get(CLIENT_IP) then
         log_record('Dynamic_Block_IP',var.request_uri,"_","_")
@@ -226,7 +229,9 @@ local worker_cc_rate_last_sync = 0
 
 local function cc_attack_check()
     if cfg("cc_check") == "on" then
-        local CC_TOKEN = "cc:" .. get_client_ip()
+        -- OPTIMIZATION: get_client_ip() is cached in ngx.ctx after first call
+        local CLIENT_IP = get_client_ip()
+        local CC_TOKEN = "cc:" .. CLIENT_IP
         local limit = shared.limit
         if limit == nil then return false end
 
@@ -270,8 +275,9 @@ local function cc_attack_check()
             local block_ttl = tonumber(cfg("cc_block_ttl"))
             if block_ttl and block_ttl > 0 then
                 local badGuys = shared.badGuys
-                if badGuys and not badGuys:get(get_client_ip()) then
-                    badGuys:set(get_client_ip(), 1, block_ttl)
+                -- OPTIMIZATION: reuse already-cached CLIENT_IP from ngx.ctx
+                if badGuys and not badGuys:get(CLIENT_IP) then
+                    badGuys:set(CLIENT_IP, 1, block_ttl)
                     log_record('CC_AutoBan', var.request_uri, "_", "ban_" .. block_ttl .. "s")
                 end
             end

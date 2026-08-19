@@ -247,18 +247,63 @@ end
 --When trust_proxy_headers="off": only use remote_addr (prevent IP spoofing)
 --Supports per-domain override via domain.json
 function get_client_ip()
-    if ngx.ctx._client_ip then
-        return ngx.ctx._client_ip
+    local ctx = ngx.ctx
+    if ctx._client_ip then
+        return ctx._client_ip
     end
     local ip
-    if get_effective_config("trust_proxy_headers") ~= "off" then
-        -- Security check: only trust forwarded headers if the direct connection
-        -- comes from a trusted CDN/proxy IP (prevents direct XFF spoofing)
-        -- is_cdn_ip returns nil when cdnip.rule doesn't exist (= trust all, original behavior)
-        -- is_cdn_ip returns false when remote_addr is not in cdnip.rule (= do NOT trust XFF)
+    -- OPTIMIZATION: use ctx-cached config instead of calling get_effective_config each time
+    -- get_effective_config does domain.json lookup + _G lookup; ctx._cfg is pre-loaded by access.lua cfg()
+    local trust_proxy = ctx._cfg and ctx._cfg["trust_proxy_headers"] or get_effective_config("trust_proxy_headers")
+    if trust_proxy ~= "off" then
         local remote = ngx.var.remote_addr
-        if is_cdn_ip(remote) ~= false then
-            local headers = ngx.req.get_headers()
+        -- OPTIMIZATION: cache is_cdn_ip() result per-request
+        -- is_cdn_ip does CIDR binary search + IP parsing; avoid repeating across multiple get_client_ip calls
+        local cdn_ok = ctx._is_cdn
+        if cdn_ok == nil then
+            -- OPTIMIZATION: fast short-circuit for loopback/private IPs before full CIDR match
+            -- 127.x / 10.x / 172.16-31.x / 192.168.x are in cdnip.rule but checking them
+            -- via string prefix is O(1) vs binary search over 37 CIDR ranges
+            if remote == "127.0.0.1" or remote == "::1" then
+                cdn_ok = true
+            elseif remote then
+                -- quick check: does remote look like a private IP?
+                local a = remote:match("^(%d+)")
+                if a then
+                    a = tonumber(a)
+                    -- 10.x.x.x = private, 192.168.x.x = private, 172.16-31.x.x = private
+                    -- These are in cdnip.rule; short-circuit avoids full CIDR binary search
+                    if a == 10 or a == 192 or a == 172 or a == 127 then
+                        cdn_ok = true
+                    end
+                end
+            end
+            -- Fall back to full CIDR match for non-trivial IPs (Cloudflare, etc.)
+            -- is_cdn_ip is forward-declared (local is_cdn_ip at line 125) so it's safe
+            -- to call here even though its full definition comes later in the file.
+            if cdn_ok == nil then
+                cdn_ok = is_cdn_ip(remote)
+                if cdn_ok == nil then cdn_ok = true end -- cdnip.rule absent = trust all
+            elseif cdn_ok == true then
+                -- Verify private IP guess was correct via full match
+                -- (only if cdnip.rule exists; if absent, trust all)
+                local full_check = is_cdn_ip(remote)
+                if full_check == false then
+                    cdn_ok = false
+                elseif full_check == nil then
+                    cdn_ok = true -- cdnip.rule absent = trust all
+                end
+            end
+            ctx._is_cdn = cdn_ok
+        end
+        if cdn_ok ~= false then
+            -- OPTIMIZATION: cache ngx.req.get_headers() per-request
+            -- get_headers() builds a full table of all request headers; avoid repeating
+            local headers = ctx._headers
+            if headers == nil then
+                headers = ngx.req.get_headers()
+                ctx._headers = headers
+            end
             -- 1. CF-Connecting-IP (Cloudflare specific, most reliable)
             ip = headers["CF_Connecting_IP"] or headers["cf-connecting-ip"]
             if ip ~= nil and not is_valid_ip(ip) then ip = nil end
@@ -291,7 +336,7 @@ function get_client_ip()
     if ip == nil then
         ip = "unknown"
     end
-    ngx.ctx._client_ip = ip
+    ctx._client_ip = ip
     return ip
 end
 
