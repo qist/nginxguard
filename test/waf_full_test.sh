@@ -214,6 +214,7 @@ test_rule "UA Baiduspider (whitelisted)" 200 -A "Baiduspider+(+http://www.baidu.
 test_rule "UA bingbot (whitelisted)" 200 -A "bingbot/2.0" "$TARGET/"
 test_rule "UA YandexBot (whitelisted)" 200 -A "YandexBot/3.0" "$TARGET/"
 test_rule "UA Applebot (whitelisted)" 200 -A "Applebot" "$TARGET/"
+test_rule "UA Amazonbot (whitelisted)" 200 -A "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot) Chrome/119.0.6045.214 Safari/537.36" "$TARGET/"
 echo "" | tee -a $RESULTS
 
 # 6. Cookie 攻击检测 (cookie.rule)
