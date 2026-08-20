@@ -6,6 +6,7 @@ TARGET="http://192.168.2.180"
 SSH180="ssh 192.168.2.180"
 NGINX_CMD="cd /opt/nginx && ./nginx -p /opt/nginx/ -c conf/nginx.conf"
 WAF_CONFIG="/opt/nginx/lua/waf/config.lua"
+RULE_CACHE_WAIT=12
 PASS=0; FAIL=0; TOTAL=0; ERRORS=""
 RESULTS="/tmp/waf_scenario_test.txt"
 > $RESULTS
@@ -113,6 +114,34 @@ test_rule "test.test.com Cookie SQL (cookie=off)" 200 -H "Host: test.test.com" -
 test_rule "test.test.com SQL注入 (url仍on)" 403 -H "Host: test.test.com" -A "Mozilla/5.0" "$TARGET/?id=1+union+select+1"
 test_rule "test.test.com /etc/passwd (url仍on)" 403 -H "Host: test.test.com" -A "Mozilla/5.0" "$TARGET/etc/passwd"
 test_rule "test.test.com sqlmap UA (ua仍on)" 403 -H "Host: test.test.com" -A "sqlmap/1.0" "$TARGET/"
+
+  echo -e "${YELLOW}  --- limit.example.com (域名级 multipart 流式扫描/body 阈值覆盖) ---${NC}" | tee -a $RESULTS
+  python3 - <<'PY' >/tmp/nginxguard_domain_large.json
+payload = "a" * (1572864)
+print('{"q":"' + payload + '"}')
+PY
+  code=$(curl --globoff -s -m 15 -o /dev/null -w "%{http_code}" -H "Host: limit.example.com" -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" --data-binary @/tmp/nginxguard_domain_large.json "$TARGET/")
+  if [ "$code" = "403" ]; then ok "limit.example.com 大JSON超1MB被拦截" "$code"; else bad "limit.example.com 大JSON超1MB被拦截" "$code" "403"; fi
+  code=$(curl --globoff -s -m 15 -o /dev/null -w "%{http_code}" -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" --data-binary @/tmp/nginxguard_domain_large.json "$TARGET/")
+  if [ "$code" = "405" ]; then ok "unknown.com 大JSON沿用全局2MB限制" "$code"; else bad "unknown.com 大JSON沿用全局2MB限制" "$code" "405"; fi
+  python3 - <<'PY' >/tmp/nginxguard_domain_multipart.txt
+import sys
+pad = "A" * 262144
+sys.stdout.write("--AaB03x\r\n")
+sys.stdout.write("Content-Disposition: form-data; name=\"note\"\r\n")
+sys.stdout.write("\r\n")
+sys.stdout.write(pad + " union select 1\r\n")
+sys.stdout.write("--AaB03x\r\n")
+sys.stdout.write("Content-Disposition: form-data; name=\"file\"; filename=\"domain-test.txt\"\r\n")
+sys.stdout.write("Content-Type: application/octet-stream\r\n")
+sys.stdout.write("\r\n")
+sys.stdout.write("hello\r\n")
+sys.stdout.write("--AaB03x--\r\n")
+PY
+  code=$(curl --globoff -s -m 10 -o /dev/null -w "%{http_code}" -H "Host: limit.example.com" -H "User-Agent: Mozilla/5.0" -H "Content-Type: multipart/form-data; boundary=AaB03x" --data-binary @/tmp/nginxguard_domain_multipart.txt "$TARGET/")
+  if [ "$code" = "403" ]; then ok "limit.example.com 启用 multipart 流式扫描" "$code"; else bad "limit.example.com 启用 multipart 流式扫描" "$code" "403"; fi
+  code=$(curl --globoff -s -m 10 -o /dev/null -w "%{http_code}" -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" -H "Content-Type: multipart/form-data; boundary=AaB03x" --data-binary @/tmp/nginxguard_domain_multipart.txt "$TARGET/")
+  if [ "$code" = "405" ]; then ok "unknown.com 默认关闭 multipart 流式扫描" "$code"; else bad "unknown.com 默认关闭 multipart 流式扫描" "$code" "405"; fi
 
 echo -e "${YELLOW}  --- 未知域名 (走全局配置) ---${NC}" | tee -a $RESULTS
 test_rule "unknown.com SQL注入 (全局)" 403 -H "Host: unknown.com" -A "Mozilla/5.0" "$TARGET/?id=1+union+select+1"

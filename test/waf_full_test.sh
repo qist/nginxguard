@@ -198,6 +198,13 @@ test_rule "etc/passwd" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=etc/passwd"
 test_rule "java.lang" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=java.lang.Runtime"
 test_rule "mosconfig" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=mosconfig%5Boption%5D=1"
 test_rule "and 1=2" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?id=1+and+1=2"
+  LONG_ARGS=$(python3 - <<'PY'
+parts = [f"a{i}=1" for i in range(260)]
+parts.append("tail=1+union+select+1")
+print("&".join(parts))
+PY
+)
+  test_rule "URL args truncated tail attack" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?${LONG_ARGS}"
 echo "" | tee -a $RESULTS
 
 # 4. User-Agent 攻击检测 (useragent.rule)
@@ -262,6 +269,29 @@ test_rule 'POST $_GET' 403 -H "User-Agent: Mozilla/5.0" -d 'x=$_GET[cmd]' "$TARG
 test_rule 'POST $_POST' 403 -H "User-Agent: Mozilla/5.0" -d 'y=$_POST[data]' "$TARGET/"
 test_rule "POST javascript:" 403 -H "User-Agent: Mozilla/5.0" -d "q=javascript:alert(1)" "$TARGET/"
 test_rule "POST document.cookie" 403 -H "User-Agent: Mozilla/5.0" -d "q=document.cookie" "$TARGET/"
+  test_rule "DELETE body SQL union" 403 -X DELETE -H "User-Agent: Mozilla/5.0" -d "id=1+union+select+1" "$TARGET/"
+  python3 - <<'PY' >/tmp/nginxguard_large_attack.json
+payload = "a" * (2097152 + 1024) + " union select 1"
+print('{"q":"' + payload + '"}')
+PY
+  code=$(curl --globoff -s -m 15 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" --data-binary @/tmp/nginxguard_large_attack.json "$TARGET/")
+  if [ "$code" = "403" ]; then ok "Large JSON over scan limit" "$code"; else bad "Large JSON over scan limit" "$code" "403"; fi
+  python3 - <<'PY' >/tmp/nginxguard_multipart_stream_default_off.txt
+import sys
+pad = "A" * 262144
+sys.stdout.write("--AaB03x\r\n")
+sys.stdout.write("Content-Disposition: form-data; name=\"note\"\r\n")
+sys.stdout.write("\r\n")
+sys.stdout.write(pad + " union select 1\r\n")
+sys.stdout.write("--AaB03x\r\n")
+sys.stdout.write("Content-Disposition: form-data; name=\"file\"; filename=\"stream-default.txt\"\r\n")
+sys.stdout.write("Content-Type: application/octet-stream\r\n")
+sys.stdout.write("\r\n")
+sys.stdout.write("hello\r\n")
+sys.stdout.write("--AaB03x--\r\n")
+PY
+  code=$(curl --globoff -s -m 15 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "Content-Type: multipart/form-data; boundary=AaB03x" --data-binary @/tmp/nginxguard_multipart_stream_default_off.txt "$TARGET/")
+  if [ "$code" = "405" ]; then ok "Multipart streaming default off" "$code"; else bad "Multipart streaming default off" "$code" "405"; fi
 echo "" | tee -a $RESULTS
 
 # 8. 正常 POST (nginx 静态 root 返回 405)
@@ -284,6 +314,17 @@ for ext in txt jpg png pdf; do
     code=$(ssh 192.168.2.180 "curl --globoff -s -m 5 -o /dev/null -w '%{http_code}' -H 'User-Agent: Mozilla/5.0' -F 'file=@/tmp/test.$ext' http://127.0.0.1:80/")
     if [ "$code" != "403" ]; then ok "Upload .$ext" "$code"; else bad "Upload .$ext" "$code" "non-403"; fi
 done
+  MULTIPART_BODY=/tmp/nginxguard_multipart_case.txt
+  cat > "$MULTIPART_BODY" <<'EOF'
+--AaB03x
+Content-Disposition: form-data; name="file"; filename="case-test.php"
+Content-Type: application/octet-stream
+
+hello
+--AaB03x--
+EOF
+  code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "Content-Type: Multipart/Form-Data; boundary=AaB03x" --data-binary @"$MULTIPART_BODY" "$TARGET/")
+  if [ "$code" = "403" ]; then ok "Upload Multipart/Form-Data case variant" "$code"; else bad "Upload Multipart/Form-Data case variant" "$code" "403"; fi
 echo "" | tee -a $RESULTS
 
 # 10. 白名单 IP / XFF 信任链 / trust_proxy_headers

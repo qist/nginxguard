@@ -128,6 +128,12 @@ waf/
         "waf_enable": "off"
     },
 
+    "limit.example.com": {
+        "multipart_streaming_check": "on",
+        "post_body_scan_limit": 1048576,
+        "upload_filename_scan_limit": 1024
+    },
+
     "*.test.com": {
         "post_check": "off",
         "cookie_check": "off"
@@ -155,9 +161,21 @@ waf/
 | `post_check` | POST 检测（表单 + JSON body） | `config_post_check` |
 | `referer_check` | Referer 检测 | `config_referer_check` |
 | `file_upload_check` | 文件上传扩展名检测 | `config_file_upload_check` |
+| `multipart_streaming_check` | 是否启用 multipart 临时文件 body 的流式内容扫描（`post.rule`）。默认 `off`；关闭时仍保留文件名扩展名检查 | `config_multipart_streaming_check` |
+| `upload_filename_scan_limit` | multipart 文件名提取扫描上限（字节）。`0`=读取整个 multipart 临时文件内容来提取 `filename`；正整数=只读取前 N 字节 | `config_upload_filename_scan_limit` |
+| `post_body_scan_limit` | 大文本 body 落盘后的检查上限（字节）。超过该值直接拦截，避免部分扫描后误放行 | `config_post_body_scan_limit` |
 | `waf_output` | 拦截输出方式 | `config_waf_output` |
 | `waf_redirect_url` | 跳转 URL | `config_waf_redirect_url` |
 | `rule_dir` | 域名专属规则目录路径，支持绝对路径或相对路径 | （无全局对应，默认走 `config_rule_dir`） |
+
+### multipart 与大 body 相关配置
+
+- `multipart_streaming_check`
+  默认 `off`。控制 **multipart 临时文件 body** 是否继续走 `post.rule` 的流式内容扫描。关闭后，危险文件名仍会被 `fileext.rule` 检测，但不会对 multipart 大 body 做那条更重的流式正文扫描。
+- `upload_filename_scan_limit`
+  只影响 **multipart 文件名提取**。`0` 表示读取整个 multipart 临时文件内容来提取 `filename=...`；正整数表示只读取前 N 字节，性能更好，但如果文件名被放在更靠后的位置，可能降低检出率。
+- `post_body_scan_limit`
+  影响非 multipart 的大文本 body（如 JSON/XML/plain text）落盘后的检查上限。超过该值直接拦截，而不是只扫描前半段后放行。
 
 ### 通配符域名
 
@@ -248,7 +266,21 @@ NginxGuard 加载规则时，会先在域名 `rule_dir` 目录中查找，找不
 ```
 CC 超限后 IP 自动加入 `badGuys` 共享字典，600 秒内所有请求直接 403，600 秒后自动解封。设为 `0` 则关闭自动拉黑，只拦截当前请求。
 
-**场景 6：NginxGuard 在 CDN 后面，仅信任 CDN IP 的 XFF**
+**场景 6：为单独域名启用 multipart 流式扫描，并收紧大 body 阈值**
+
+```json
+"limit.example.com": {
+    "multipart_streaming_check": "on",
+    "post_body_scan_limit": 1048576,
+    "upload_filename_scan_limit": 1024
+}
+```
+
+- 该域名会启用 multipart 临时文件 body 的流式扫描
+- 大文本 body 超过 `1MB` 时直接拦截
+- multipart 文件名只扫描前 `1024` 字节
+
+**场景 7：NginxGuard 在 CDN 后面，仅信任 CDN IP 的 XFF**
 
 当 NginxGuard 部署在 CDN/反向代理后面时，需要从 `X-Forwarded-For` 获取真实客户端 IP。但直接信任 XFF 会让攻击者伪造该头绕过 IP 黑白名单。
 
@@ -302,7 +334,7 @@ config_trust_proxy_headers = "on"
 }
 ```
 
-**场景 7：NginxGuard 直接暴露公网，防止 IP 伪造**
+**场景 8：NginxGuard 直接暴露公网，防止 IP 伪造**
 ```lua
 -- config.lua
 config_trust_proxy_headers = "off"

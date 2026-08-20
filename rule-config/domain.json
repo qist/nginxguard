@@ -12,6 +12,13 @@
         "waf_enable": "off"
     },
 
+    "limit.example.com": {
+        "_comment": "示例：域名级 body/file 扫描阈值覆盖。仅用于演示按域名单独控制检查上限。",
+        "multipart_streaming_check": "on",
+        "post_body_scan_limit": 1048576,
+        "upload_filename_scan_limit": 1024
+    },
+
     "*.test.com": {
         "post_check": "off",
         "cookie_check": "off"

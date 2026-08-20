@@ -46,6 +46,15 @@ config_post_check = "on"
 config_referer_check = "off"
 --enable/disable file upload extension filtering
 config_file_upload_check = "on"
+--enable/disable multipart temp-file body streaming scan (post.rule)
+--when off, keep filename extension checks enabled and only skip multipart temp-file body streaming scans
+config_multipart_streaming_check = "off"
+--multipart upload filename scan limit in bytes
+--0 = scan the entire multipart temp file; positive integer = scan only the first N bytes
+config_upload_filename_scan_limit = 0
+--inspection limit in bytes for large temp-file bodies (JSON/XML/plain text, etc.)
+--requests larger than this limit are denied to avoid partial scans that fail open
+config_post_body_scan_limit = 2097152
 --config waf output redirect/html
 config_waf_output = "html"
 --if config_waf_output ,setting url

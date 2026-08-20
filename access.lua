@@ -28,6 +28,11 @@ local table_concat = table.concat
 local string_sub = string.sub
 local string_char = string.char
 local string_lower = string.lower
+local string_gsub = string.gsub
+
+local MAX_URI_ARGS_PARSE = 256
+local MAX_INSPECTABLE_BODY_FILE_SIZE = 2097152
+local DEFAULT_UPLOAD_FILENAME_SCAN_LIMIT = 0
 
 --Combined decode: recursive URL-decode + JS unicode/entity decode in one pass
 --FAST PATH: only runs decoders if their markers are present
@@ -104,6 +109,7 @@ local CONFIG_KEYS = {
     "white_ua_check", "user_agent_check", "url_check", "url_args_check",
     "cookie_check", "cc_check", "cc_rate", "cc_block_ttl",
     "post_check", "referer_check", "file_upload_check", "trust_proxy_headers",
+    "multipart_streaming_check", "upload_filename_scan_limit", "post_body_scan_limit",
 }
 
 local function cfg(key)
@@ -125,6 +131,22 @@ end
 -- Avoids separate is_waf_enabled() calls inside each check function
 local function waf_on_and(key)
     return cfg("waf_enable") == "on" and cfg(key) == "on"
+end
+
+local function is_bodyless_method(method)
+    return method == "GET" or method == "HEAD" or method == "OPTIONS"
+end
+
+local function is_multipart_streaming_enabled()
+    return cfg("multipart_streaming_check") == "on"
+end
+
+local function cfg_number(key, default_value)
+    local value = tonumber(cfg(key))
+    if value == nil then
+        return default_value
+    end
+    return value
 end
 
 --allow white ip
@@ -390,7 +412,7 @@ local function url_args_attack_check()
         if args_entry == nil or args_entry.empty then
             return false
         end
-        local ok, REQ_ARGS = pcall(req_get_uri_args)
+        local ok, REQ_ARGS, REQ_ARGS_ERR = pcall(req_get_uri_args, MAX_URI_ARGS_PARSE)
         if not ok or REQ_ARGS == nil then
             return false
         end
@@ -435,6 +457,36 @@ local function url_args_attack_check()
                 end
                 if matched then
                     log_record('Deny_URL_Args',var.request_uri,"-",matched)
+                    if is_waf_enabled() == "on" then
+                        waf_output()
+                        return true
+                    end
+                end
+            end
+        end
+        if REQ_ARGS_ERR == "truncated" then
+            local RAW_ARGS = var.args
+            if RAW_ARGS and #RAW_ARGS > 0 then
+                local matched = match_rule_entry(args_entry, RAW_ARGS, "joi")
+                local normalized_args = nil
+                if not matched and string_find(RAW_ARGS, "+", 1, true) then
+                    normalized_args = string_gsub(RAW_ARGS, "+", " ")
+                    matched = match_rule_entry(args_entry, normalized_args, "joi")
+                end
+                if not matched and has_encode_markers(RAW_ARGS) then
+                    local decoded, changed = full_decode(RAW_ARGS)
+                    if changed then
+                        matched = match_rule_entry(args_entry, decoded, "joi")
+                    end
+                end
+                if not matched and normalized_args and has_encode_markers(normalized_args) then
+                    local decoded, changed = full_decode(normalized_args)
+                    if changed then
+                        matched = match_rule_entry(args_entry, decoded, "joi")
+                    end
+                end
+                if matched then
+                    log_record('Deny_URL_Args', var.request_uri, "truncated_query", matched)
                     if is_waf_enabled() == "on" then
                         waf_output()
                         return true
@@ -523,14 +575,24 @@ local function extract_filenames_from_multipart()
     if not f then return filenames end
 
     local chunk_size = 65536
-    local max_scan = 2097152
-    local total = 0
     local prev_tail = ""
+    local scan_limit = cfg_number("upload_filename_scan_limit", DEFAULT_UPLOAD_FILENAME_SCAN_LIMIT)
+    local scanned = 0
 
-    while total < max_scan do
-        local chunk = f:read(chunk_size)
+    while true do
+        if scan_limit > 0 and scanned >= scan_limit then
+            break
+        end
+        local read_size = chunk_size
+        if scan_limit > 0 then
+            local remaining = scan_limit - scanned
+            if remaining < read_size then
+                read_size = remaining
+            end
+        end
+        local chunk = f:read(read_size)
         if not chunk then break end
-        total = total + #chunk
+        scanned = scanned + #chunk
         local data = prev_tail .. chunk
 
         append_filenames_from_data(data)
@@ -554,7 +616,8 @@ local function file_upload_check()
         end
         local CONTENT_TYPE = var.content_type
         if CONTENT_TYPE == nil then return false end
-        if not string_find(CONTENT_TYPE, "multipart/form%-data", 1) then
+        local content_type = string_lower(CONTENT_TYPE)
+        if not string_find(content_type, "multipart/form-data", 1, true) then
             return false
         end
         local ok = pcall(req_read_body)
@@ -586,7 +649,7 @@ local function post_attack_check()
         end
         -- OPTIMIZATION 1: skip body-less methods early
         local METHOD = req_get_method()
-        if METHOD == "GET" or METHOD == "HEAD" or METHOD == "OPTIONS" or METHOD == "DELETE" then
+        if is_bodyless_method(METHOD) then
             return false
         end
 
@@ -596,6 +659,8 @@ local function post_attack_check()
         local content_type = CONTENT_TYPE and string_lower(CONTENT_TYPE) or nil
         local is_form_urlencoded = content_type
             and string_find(content_type, "application/x-www-form-urlencoded", 1, true) ~= nil
+        local is_multipart_form = content_type
+            and string_find(content_type, "multipart/form-data", 1, true) ~= nil
         local should_parse_post_args = is_form_urlencoded
         local waf_enabled = is_waf_enabled() == "on"
 
@@ -663,14 +728,34 @@ local function post_attack_check()
             if file then
                 local f = io.open(file, "rb")
                 if f then
+                    local file_size = f:seek("end")
+                    f:seek("set", 0)
+                    local post_body_scan_limit = cfg_number("post_body_scan_limit", MAX_INSPECTABLE_BODY_FILE_SIZE)
+                    if post_body_scan_limit <= 0 then
+                        post_body_scan_limit = MAX_INSPECTABLE_BODY_FILE_SIZE
+                    end
+                    if (not is_multipart_form) and file_size and file_size > post_body_scan_limit then
+                        log_record('Deny_URL_POST_Oversize', var.request_uri,
+                            "size:" .. tostring(file_size),
+                            "max:" .. tostring(post_body_scan_limit))
+                        f:close()
+                        if waf_enabled then
+                            waf_output()
+                        end
+                        return true
+                    end
+                      if is_multipart_form and not is_multipart_streaming_enabled() then
+                          f:close()
+                          return false
+                      end
                     local chunk_size = 65536
-                    local max_scan = 2097152
+                    local max_scan = is_multipart_form and post_body_scan_limit or file_size
                     local overlap = 2048
                     local total = 0
                     local prev_tail = ""
                     local found = false
 
-                    while total < max_scan and not found do
+                    while (max_scan == nil or total < max_scan) and not found do
                         local chunk = f:read(chunk_size)
                         if not chunk then break end
                         total = total + #chunk
@@ -751,7 +836,7 @@ local function waf_main()
     end
     -- Determine request type early (used for multiple short-circuits below)
     local METHOD = req_get_method()
-    local is_bodyless = (METHOD == "GET" or METHOD == "HEAD" or METHOD == "OPTIONS" or METHOD == "DELETE")
+    local is_bodyless = is_bodyless_method(METHOD)
 
     -- Request-type checks (always run)
     if user_agent_attack_check() then
