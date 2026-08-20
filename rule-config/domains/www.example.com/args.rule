@@ -8,7 +8,7 @@
 \:\$
 \$\{\s*\w+\s*\{|(?i:\$\{jndi)
 (?i:select)[^;]{0,200}(?i:from)[^;]{0,200}(?i:information_schema|union|concat|sleep|benchmark|load_file|into|outfile|@@|cast|convert)
-(?i:having)\s+(?i:count|sum|avg|min|max|group_concat)\s*\(|rongjitest
+(?i:having)\s+(?i:count|sum|avg|min|max|group_concat)\s*\(|rongjitest|(?i:having)\s+\d+\s*=\s*\d+
 sleep\((\s*)(\d*)(\s*)\)
 benchmark\([^,]*,\s*[^)]*\)
 base64_decode\(
@@ -27,11 +27,11 @@ java\.lang
 ['"]\s*(?:-{2}|#|/\*)
 (?i:and)[\s/\*!-]*['"]?\d+['"]?\s*=\s*['"]?\d+['"]?\s*([#\-]|/\*|--|\s*$)
 (?i:or)[\s/\*!-]*['"]?\d+['"]?\s*=\s*['"]?\d+['"]?\s*([#\-]|/\*|--|\s*$)
-(?i:order)\s+(?i:by)\s+\d+\s+([#\-]|/\*|--|\s*$)
+(?i:order)\s+(?i:by)\s+\d+
 proc\/self\/environ
 mosconfig\[[a-z0-9_]{1,200}\]=
 (?i:cmd|command|exec|execute|shell|terminal|console|powershell|pwsh)=[^&\s]{0,10}(ls|cat|whoami|id|uname|ifconfig|netstat|wget|curl|nc|ncat|bash|chmod|chown|kill|rm|sudo|su)(\s|$|;|&|\|)
-(?i:(?:perl|python|ruby|tcl)\s+-[eich]|(?:perl|python|ruby|tcl)\s+\/(?:tmp|dev|var|home|root|proc|etc)|exec\s+(?:perl|python|ruby|tcl))
+(?i:(?:perl|python|ruby|tcl)\s+-[eich]|(?:perl|python|ruby|tcl)\s+\/(?:tmp|dev|var|home|root|proc|etc)|exec\s+(?:perl|python|ruby|tcl)|(?i:perl\s+\w+\.pl))
 (?i:alert|confirm|prompt)\s*\(
 javascript\:
 vbscript\:
@@ -225,3 +225,22 @@ __schema|__type
 \$func[\(:"']
 \$expr[\(:"']
 \$accumulator[\(:"']
+
+# ===== 命令注入增强 - 管道符|、分号; 后跟命令 =====
+(\||;)\s*(ls|cat|whoami|id|uname|ifconfig|netstat|wget|curl|nc|ncat|bash|chmod|chown|kill|rm|sudo|su)\s
+;\s*(wget|curl|nc|ncat|bash|python|perl|ruby|chmod|chown|kill|rm|sudo|su)\s
+
+# ===== SSTI 增强 - 简单算术表达式 {{7*7}} {{7+7}} 等 =====
+\{\{\s*\d+\s*[\+\-\*/]\s*\d+\s*\}\}
+
+# ===== SSRF 增强 - 内网IP段 =====
+http://192\.168\.
+http://10\.
+http://172\.(16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31)\.
+https://192\.168\.
+https://10\.
+https://172\.(16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31)\.
+
+# ===== PHP 代码注入 =====
+(?i:<\?php)
+(?i:<\?=)
