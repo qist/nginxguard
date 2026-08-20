@@ -625,7 +625,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 |------|------|
 | CPU | 4 核 x86_64 |
 | 内存 | 24 GB |
-| OS | Linux 5.14 (RHEL 9) |
+| OS | Linux 6.18 (RHEL 9) |
 | Nginx | 1.31.3 + LuaJIT2 (OpenResty 分支) |
 | 全场景压测 | 200 并发，50000 请求，Keep-Alive（GET / form POST / JSON POST 分组对比） |
 | `trust_proxy_headers` 对比 | 100 并发，30000 请求，Keep-Alive |
@@ -667,24 +667,24 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 
 | 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
 |------|-------|-----|-----|-----|---------|
-| GET 基线（WAF 全关） | 25,712 | 298% | 166 MB | 47ms | — |
-| GET + WAF（无 CC/POST） | 20,053 | 300% | 174 MB | 67ms | 22.0% |
-| GET + WAF + CC | 21,407 | 290% | 172 MB | 35ms | 16.7% |
-| GET + WAF 全开（生产） | 20,504 | 298% | 172 MB | 94ms | 20.3% |
+| GET 基线（WAF 全关） | 27,516 | 273% | 174 MB | 43ms | — |
+| GET + WAF（无 CC/POST） | 22,912 | 304% | 179 MB | 34ms | 16.7% |
+| GET + WAF + CC | 23,287 | 304% | 179 MB | 30ms | 15.4% |
+| GET + WAF 全开（生产） | 21,240 | 268% | 179 MB | 35ms | 22.8% |
 
 ##### form POST
 
 | 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
 |------|-------|-----|-----|-----|---------|
-| form POST 基线（WAF 全关） | 27,362 | 295% | 168 MB | 30ms | — |
-| form POST + WAF（CC 关闭） | 18,680 | 294% | 184 MB | 42ms | 31.7% |
+| form POST 基线（WAF 全关） | 31,243 | 187% | 174 MB | 27ms | — |
+| form POST + WAF（CC 关闭） | 21,634 | 286% | 183 MB | 29ms | 30.7% |
 
 ##### JSON POST
 
 | 场景 | req/s | CPU | RSS | P99 | 吞吐下降 |
 |------|-------|-----|-----|-----|---------|
-| JSON POST 基线（WAF 全关） | 26,795 | 284% | 168 MB | 68ms | — |
-| JSON POST + WAF（CC 关闭） | 19,843 | 329% | 182 MB | 72ms | 26.0% |
+| JSON POST 基线（WAF 全关） | 32,188 | 192% | 174 MB | 39ms | — |
+| JSON POST + WAF（CC 关闭） | 20,547 | 292% | 182 MB | 66ms | 36.2% |
 
 > `吞吐下降` 仅在同一请求类型内计算，不再拿 GET 基线直接对比 POST 场景。
 
@@ -699,7 +699,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 | `trust_proxy_headers=on` + cdnip.rule + XFF | 17,713 | 5.645ms | 25ms | 模拟真实 CDN 透传 `X-Forwarded-For` |
 | `trust_proxy_headers=on` + 无 cdnip.rule + XFF | 17,060 | 5.862ms | 27ms | 无 CDN 校验时 XFF 场景仍更重 |
 
-> **结论**：按 2026-08-19 在 `192.168.2.180` 的最新实测结果，NginxGuard 在 GET 常规流量下，全开但关闭 CC/POST 时吞吐下降约 **22%**；开启 CC 后吞吐下降约 **17%**。本轮进一步优化后，`form POST + WAF` 提升到 **18,680 req/s**，`JSON POST + WAF` 提升到 **19,843 req/s**，相比上一轮分别从 **13,122 req/s** 和 **10,834 req/s** 明显抬升。关键优化措施：
+> **结论**：按 2026-08-20 在 `192.168.2.180` 的最新实测结果（Nginx 内存优化配置：缩小 `lua_shared_dict`、调小 buffer 尺寸、缩减 `proxy_cache_path`、关闭 `limit_conn`、`open_file_cache` 调优），NginxGuard 在 GET 常规流量下，全开但关闭 CC/POST 时吞吐下降约 **16.7%**；开启 CC 后吞吐下降约 **15.4%**。本轮 `form POST + WAF` 提升到 **21,634 req/s**，`JSON POST + WAF` 提升到 **20,547 req/s**，相比上一轮（8/19）分别从 **18,680 req/s** 和 **19,843 req/s** 继续抬升。关键优化措施：
 >
 > 1. **请求类型短路**：GET/HEAD/OPTIONS/DELETE 跳过 POST 和文件上传检测，避免无意义的 body 读取
 > 2. **规则双引擎**：纯字符串规则用 `string.find`（快 10 倍），正则规则用合并 `ngx.re.find`，减少正则引擎负载
@@ -714,7 +714,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 > 11. **POST Content-Type 分流**：表单请求才走 `get_post_args()`，JSON/XML/plain body 直接按原始 body 扫描
 > 12. **规则匹配缓存**：重复的小体积参数/body 按 `mtime + flags + input` 复用匹配结果，显著降低 POST 热路径正则成本
 >
-> 这轮实测里，`trust_proxy_headers=on` + `cdnip.rule` 相比 `off` 仍有额外开销，但明显优于“无 `cdnip.rule` 时无条件信任 XFF”的路径；生产环境依然建议保留 CDN IP 校验。CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。新增的 worker 级匹配缓存主要把收益打在重复参数和重复 body 的 POST 热路径上。
+> 本轮新增的 **Nginx 内存优化**：将 `lua_shared_dict limit`/`badGuys` 从 100m 缩减到 10m，`client_header_buffer_size` 从 1024k 缩到 1k，`large_client_header_buffers` 从 4×128k 缩到 4×8k，`client_body_buffer_size` 从 1024k 缩到 128k，`proxy_buffer_size`/`proxy_buffers` 从 64k 缩到 16k，`proxy_cache_path` 从 50m/7d/2g 缩到 10m/1d/1g，`open_file_cache` 从 100000 条缩到 10000 条。实测 WAF 关闭时内存 174MB，WAF 全开后 179-183MB，内存仅增加 5-9MB，且所有场景 P99 延迟均控制在 66ms 以内。`trust_proxy_headers=on` + `cdnip.rule` 相比 `off` 仍有额外开销，但明显优于“无 `cdnip.rule` 时无条件信任 XFF”的路径；生产环境依然建议保留 CDN IP 校验。CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。新增的 worker 级匹配缓存主要把收益打在重复参数和重复 body 的 POST 热路径上。
 
 ---
 
