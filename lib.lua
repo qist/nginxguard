@@ -1001,7 +1001,19 @@ end
 --Only triggered on attack detection, normal traffic has zero log overhead
 local log_last_rotation_time = 0
 
+-- Truncate oversized fields so a single huge request cannot blow up the
+-- JSON log line or cause the shared-memory/flush to drop the entry silently.
+local LOG_FIELD_MAX = 4096
+local function truncate_field(s)
+    if type(s) ~= "string" then return s end
+    if #s > LOG_FIELD_MAX then return string.sub(s, 1, LOG_FIELD_MAX) .. "...[truncated]" end
+    return s
+end
+
 function log_record(method,url,data,ruletag)
+    -- Guard against oversized request_uri / payloads filling the log line
+    local safe_url = truncate_field(url)
+    local safe_data = truncate_field(data)
     local LOG_PATH = config_log_dir
     local CLIENT_IP = get_client_ip()
     local USER_AGENT = get_user_agent()
@@ -1015,8 +1027,8 @@ function log_record(method,url,data,ruletag)
                  server_name = DOMAIN,
                  user_agent = USER_AGENT,
                  attack_method = method,
-                 req_url = url,
-                 req_data = data,
+                 req_url = safe_url,
+                 req_data = safe_data,
                  rule_tag = ruletag,
               }
     local LOG_LINE = cjson.encode(log_json_obj)

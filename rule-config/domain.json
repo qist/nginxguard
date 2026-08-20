@@ -19,6 +19,11 @@
         "upload_filename_scan_limit": 1024
     },
 
+    "strict.example.com": {
+        "_comment": "示例：对该域名强制扫描所有方法的 body（包括 GET/HEAD/OPTIONS）",
+        "bodyless": "off"
+    },
+
     "*.test.com": {
         "post_check": "off",
         "cookie_check": "off"

@@ -134,6 +134,10 @@ waf/
         "upload_filename_scan_limit": 1024
     },
 
+    "strict.example.com": {
+        "bodyless": "off"
+    },
+
     "*.test.com": {
         "post_check": "off",
         "cookie_check": "off"
@@ -146,6 +150,8 @@ waf/
 | 字段 | 说明 | 对应 config.lua 变量 |
 |------|------|---------------------|
 | `waf_enable` | NginxGuard 总开关 | `config_waf_enable` |
+| `log_dir` | WAF 日志目录（绝对路径） | `config_log_dir` |
+| `rule_dir` | 全局规则文件目录（绝对路径），域名级可用 `rule_dir` 覆盖 | `config_rule_dir` |
 | `trust_proxy_headers` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=NginxGuard 在 CDN/反代后，根据 `cdnip.rule` 判断是否信任转发头：`remote_addr` 在 `cdnip.rule` 中才信任 XFF，不在则用 `remote_addr` 防伪造；`cdnip.rule` 不存在或为空则信任所有 XFF（原始方案，存在伪造风险）。`"off"`=NginxGuard 直接暴露公网，只用 `remote_addr` 防伪造 | `config_trust_proxy_headers` |
 | `white_url_check` | 白名单 URL 检测 | `config_white_url_check` |
 | `white_ua_check` | 白名单 UA 检测（搜索引擎爬虫放行，仅跳过 UA 黑名单检测，不影响 URL/POST/CC 等其他检测） | `config_white_ua_check` |
@@ -154,6 +160,7 @@ waf/
 | `url_check` | URL 攻击检测 | `config_url_check` |
 | `url_args_check` | URL 参数检测 | `config_url_args_check` |
 | `user_agent_check` | User-Agent 检测 | `config_user_agent_check` |
+| `bodyless` | 是否对 GET/HEAD/OPTIONS 等无 body 方法跳过 body/post/file_upload 检测。`"on"`（默认）=跳过；`"off"`=对所有方法扫描 body（更高延迟） | `config_bodyless` |
 | `cookie_check` | Cookie 检测 | `config_cookie_check` |
 | `cc_check` | CC 攻击检测 | `config_cc_check` |
 | `cc_rate` | CC 限速（次数/秒数） | `config_cc_rate` |
@@ -164,9 +171,8 @@ waf/
 | `multipart_streaming_check` | 是否启用 multipart 临时文件 body 的流式内容扫描（`post.rule`）。默认 `off`；关闭时仍保留文件名扩展名检查 | `config_multipart_streaming_check` |
 | `upload_filename_scan_limit` | multipart 文件名提取扫描上限（字节）。`0`=读取整个 multipart 临时文件内容来提取 `filename`；正整数=只读取前 N 字节 | `config_upload_filename_scan_limit` |
 | `post_body_scan_limit` | 大文本 body 落盘后的检查上限（字节）。超过该值直接拦截，避免部分扫描后误放行 | `config_post_body_scan_limit` |
-| `waf_output` | 拦截输出方式 | `config_waf_output` |
-| `waf_redirect_url` | 跳转 URL | `config_waf_redirect_url` |
-| `rule_dir` | 域名专属规则目录路径，支持绝对路径或相对路径 | （无全局对应，默认走 `config_rule_dir`） |
+| `waf_output` | 拦截输出方式（`"html"` 或 `"redirect"`） | `config_waf_output` |
+| `waf_redirect_url` | 跳转 URL（`waf_output="redirect"` 时生效） | `config_waf_redirect_url` |
 
 ### multipart 与大 body 相关配置
 
@@ -266,6 +272,8 @@ NginxGuard 加载规则时，会先在域名 `rule_dir` 目录中查找，找不
 ```
 CC 超限后 IP 自动加入 `badGuys` 共享字典，600 秒内所有请求直接 403，600 秒后自动解封。设为 `0` 则关闭自动拉黑，只拦截当前请求。
 
+> **注意**：`cc_rate` 格式必须为 `"次数/秒数"`（如 `"150/60"`）。如果格式错误（如 `"abc"` 或 `"10"`），CC 检测会自动失效（静默 fail open），同时在 Nginx `error.log` 中记录 `[NginxGuard] invalid cc_rate config` 错误日志，方便排查配置问题。
+
 **场景 6：为单独域名启用 multipart 流式扫描，并收紧大 body 阈值**
 
 ```json
@@ -280,7 +288,26 @@ CC 超限后 IP 自动加入 `badGuys` 共享字典，600 秒内所有请求直�
 - 大文本 body 超过 `1MB` 时直接拦截
 - multipart 文件名只扫描前 `1024` 字节
 
-**场景 7：NginxGuard 在 CDN 后面，仅信任 CDN IP 的 XFF**
+**场景 7：强制对 GET/HEAD/OPTIONS 方法也扫描 body**
+
+默认情况下（`config_bodyless = "on"`），GET/HEAD/OPTIONS 请求会跳过 `file_upload_check` 和 `post_attack_check`，因为这些方法通常没有 body。如果需要对特定域名强制扫描所有方法的 body（更严格，但延迟更高），可以设为 `"off"`：
+
+```json
+"strict.example.com": {
+    "bodyless": "off"
+}
+```
+
+也可在 `config.lua` 中全局设置：
+
+```lua
+-- 全局强制所有方法扫描 body（更高延迟）
+config_bodyless = "off"
+```
+
+> 默认 `"on"` 适用于绝大多数场景。仅在确有需求（如 GET 请求携带 body 的非标准 API）时才设为 `"off"`。
+
+**场景 8：NginxGuard 在 CDN 后面，仅信任 CDN IP 的 XFF**
 
 当 NginxGuard 部署在 CDN/反向代理后面时，需要从 `X-Forwarded-For` 获取真实客户端 IP。但直接信任 XFF 会让攻击者伪造该头绕过 IP 黑白名单。
 
@@ -334,7 +361,7 @@ config_trust_proxy_headers = "on"
 }
 ```
 
-**场景 8：NginxGuard 直接暴露公网，防止 IP 伪造**
+**场景 9：NginxGuard 直接暴露公网，防止 IP 伪造**
 ```lua
 -- config.lua
 config_trust_proxy_headers = "off"
@@ -647,6 +674,14 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 
 日志文件路径：`config_log_dir/YYYY-MM-DD_waf.log`
 
+### 日志字段截断保护
+
+为防止单个超大请求（如精心构造的超长 URL 或超大 POST body）撑爆日志行或导致 `cjson.encode` 输出过大，`log_record` 对 `req_url` 和 `req_data` 字段做了截断保护：
+
+- 单字段最大 **4096 字节**，超出部分追加 `...[truncated]` 标记
+- 截断后仍保留前 4096 字节内容，确保攻击特征可溯源
+- 非字符串类型（如 `nil`、`boolean`）原样透传，不做处理
+
 ---
 
 ## 性能测试
@@ -673,7 +708,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 | FFI stat | LuaJIT FFI 直接调用 libc `stat()` 获取 mtime，避免 Lua IO 开销 |
 | glob 预编译 | IP 通配符规则（`192.168.*`、`2001:db8::*`）在加载时预编译 regex |
 | cc_rate 缓存 | CC 限速参数解析提升到 worker 级，仅配置变更时重解析 |
-| 配置一次加载 | 所有 16 个配置项在请求入口一次性加载到 `ngx.ctx._cfg`，避免每检测项重复调用 `get_effective_config` |
+| 配置一次加载 | 所有 20 个配置项在请求入口一次性加载到 `ngx.ctx._cfg`，避免每检测项重复调用 `get_effective_config` |
 | require 模块级 | `cjson`/`io`/`os` 从函数内 `require` 提到模块顶部 |
 | 消除冗余调用 | `file_upload_check`/`post_attack_check` 移除多余的 `get_rule` 调用 |
 | 同步日志 | 仅攻击触发时同步写入+flush，正常流量零 IO 开销 |
@@ -735,7 +770,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 >
 > 1. **请求类型短路**：GET/HEAD/OPTIONS/DELETE 跳过 POST 和文件上传检测，避免无意义的 body 读取
 > 2. **规则双引擎**：纯字符串规则用 `string.find`（快 10 倍），正则规则用合并 `ngx.re.find`，减少正则引擎负载
-> 3. **配置一次加载**：所有 16 个配置项在请求入口一次性加载到 `ngx.ctx._cfg`，避免每检测项重复调用 `get_effective_config`
+> 3. **配置一次加载**：所有 20 个配置项在请求入口一次性加载到 `ngx.ctx._cfg`，避免每检测项重复调用 `get_effective_config`
 > 4. **解码快速特征检测**：`has_encode_markers` 使正常流量（无编码字符）跳过递归解码和 JS unicode 解码，零额外开销
 > 5. **白名单 hash 优化**：`whiteua.rule`（50条纯字符串）和 `whiteurl.rule` 使用 `string.find` 替代 `ngx.re.find`，避免 PCRE JIT 开销
 > 6. **空规则快速返回**：规则文件为空时 `match_any_rule` 立即返回 nil，避免无谓的 regex 编译
@@ -773,7 +808,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
        ↓
 9. cc_attack_check    → CC 限速
        ↓
-10. file_upload_check → 文件上传扩展名（非 GET/HEAD/OPTIONS/DELETE）
+10. file_upload_check → 文件上传扩展名（`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
        ↓
 11. url_attack_check  → URL 路径攻击
        ↓
@@ -781,7 +816,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
        ↓
 13. cookie_check      → Cookie 攻击
        ↓
-14. post_check        → POST 攻击（表单 + JSON body，非 GET/HEAD/OPTIONS/DELETE）
+14. post_check        → POST 攻击（表单 + JSON body，`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
        ↓
      放行
 ```

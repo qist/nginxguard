@@ -110,6 +110,7 @@ local CONFIG_KEYS = {
     "cookie_check", "cc_check", "cc_rate", "cc_block_ttl",
     "post_check", "referer_check", "file_upload_check", "trust_proxy_headers",
     "multipart_streaming_check", "upload_filename_scan_limit", "post_body_scan_limit",
+    "bodyless",
 }
 
 local function cfg(key)
@@ -133,7 +134,14 @@ local function waf_on_and(key)
     return cfg("waf_enable") == "on" and cfg(key) == "on"
 end
 
+-- Whether the given method is treated as "bodyless" (no request body to scan).
+-- Controlled by config_bodyless:
+--   "on"  (default) -> GET/HEAD/OPTIONS skip body/post/file_upload checks
+--   "off"           -> every method is scanned for body/post content
 local function is_bodyless_method(method)
+    if cfg("bodyless") == "off" then
+        return false
+    end
     return method == "GET" or method == "HEAD" or method == "OPTIONS"
 end
 
@@ -314,6 +322,11 @@ local function cc_attack_check()
                     limit:set("cc_rate_count", parsed_count, 300)
                     limit:set("cc_rate_seconds", parsed_seconds, 300)
                     limit:set("cc_rate_str", cc_rate, 300)
+                else
+                    -- Invalid cc_rate (e.g. "abc" or "10"): CC protection would
+                    -- silently fail open. Log an error so the misconfig is visible.
+                    ngx.log(ngx.ERR, "[NginxGuard] invalid cc_rate config: ",
+                        tostring(cc_rate), " (expected '<count>/<seconds>'), CC check disabled")
                 end
                 worker_cc_count = parsed_count
                 worker_cc_seconds = parsed_seconds
@@ -850,7 +863,7 @@ local function waf_main()
     end
 
     -- OPTIMIZATION 1: request-type short-circuit
-    -- GET/HEAD/OPTIONS/DELETE: skip file_upload and post checks
+    -- GET/HEAD/OPTIONS skip file_upload and post checks (controlled by bodyless config)
     if not is_bodyless then
         if file_upload_check() then
             return
