@@ -4,4 +4,4 @@
 (zgrab|nikto|dirb|gobuster|ffuf|dirmap|feroxbuster|wfuzz|skipfish|wapiti|whatweb|nuclei|naabu|subfinder|amass|shodan|censys|sqlninja|bsqlbf|dbmap|pwntools)
 (Python-urllib|Python-requests|Go-http-client|scrapy|NetEstate|BLEXBot|Sistrix|SiteAuditBot|SEOkicks|BacklinkCrawler|linkdexbot|Cliqzbot|findlinks|MetaJobBot|Amazonbot|Applebot-Extended|DataForSeoBot|serpstatbot|BomboraBot)
 (Fiddler|Charles|Postman|archiver|JBH|JaEYeol|MySQLMAN|DTSN|absinthe|OSSTMM|Brutus|Caveman|CursedGoogle|WinHTTrack|WebRipper|WebStripper|SiteSucker|SiteCopier|PageNest|BlackWidow|Teleport|Offline Explorer|Offline Navigator|GetWeb)
-(W3C_Validator|Jigsaw|netcraft|w3m|lynx|ELinks|libwww-perl|WinHTTP|MacOutlook|Indy|DBM|HCDM)
+(W3C_Validator|Jigsaw|netcraft|w3m|lynx|ELinks|libwww-perl|WinHTTP|MacOutlook|Indy|\bDBM\b|\bHCDM\b)
