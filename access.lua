@@ -25,6 +25,23 @@ local pairs = pairs
 local ipairs = ipairs
 local table_insert = table.insert
 local table_concat = table.concat
+
+--Safe table concat: filters out non-string/non-number values (e.g. boolean true
+--from ngx.req.get_uri_args for flags like ?name without =value)
+--before concatenating, preventing "invalid value (boolean)" errors
+local function safe_table_concat(t, sep)
+    local parts = {}
+    for _, v in ipairs(t) do
+        local tv = type(v)
+        if tv == "string" then
+            table_insert(parts, v)
+        elseif tv == "number" then
+            table_insert(parts, tostring(v))
+        end
+    end
+    if #parts == 0 then return nil end
+    return table_concat(parts, sep)
+end
 local string_sub = string.sub
 local string_char = string.char
 local string_lower = string.lower
@@ -456,7 +473,7 @@ local function url_args_attack_check()
             -- check parameter value
             local ARGS_DATA
             if type(val) == 'table' then
-                ARGS_DATA = table_concat(val, " ")
+                ARGS_DATA = safe_table_concat(val, " ")
             else
                 ARGS_DATA = val
             end
@@ -705,7 +722,7 @@ local function post_attack_check()
                 -- check parameter value
                 local POST_DATA
                 if type(val) == 'table' then
-                    POST_DATA = table_concat(val, " ")
+                    POST_DATA = safe_table_concat(val, " ")
                 else
                     POST_DATA = val
                 end
