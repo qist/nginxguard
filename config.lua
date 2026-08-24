@@ -18,10 +18,8 @@ config_trust_proxy_headers = "on"
 config_log_dir = "/opt/nginx/log/"
 --rule setting
 config_rule_dir = "/opt/nginx/lua/waf/rule-config"
---enable/disable white url
+--enable/disable white url (url path allowlist, supports optional per-URL skip checks)
 config_white_url_check = "on"
---enable/disable url-level skip config (urlskip.rule: per-URL configurable skip checks)
-config_url_skip_check = "on"
 --enable/disable white ip
 config_white_ip_check = "on"
 --enable/disable white ua (search engine bots skip UA blacklist only, other checks still apply)

@@ -221,8 +221,68 @@ local function dynamic_black_ip_check()
 end
 
 --allow white url
---Uses string.find (plain mode) instead of ngx.re.find for each whitelist entry
---This avoids PCRE JIT overhead for simple path patterns like /static/, /api/login
+--whiteurl.rule supports two formats:
+--  /path/                          -> default: skip url_attack only
+--  /path/ user_agent,referer,...    -> skip specified checks
+--Available skip checks: user_agent,referer,url_attack,url_args,cookie,post,file_upload,cc
+--Lines starting with # are comments
+--Uses string.find (plain mode) for path matching to avoid PCRE JIT overhead
+local WHITEURL_SKIP_VALID = {
+    user_agent = true, referer = true, url_attack = true, url_args = true,
+    cookie = true, post = true, file_upload = true, cc = true,
+}
+
+--Worker-level cache for parsed whiteurl.rule (extended format)
+local worker_whiteurl_cache = {}
+
+--Parse whiteurl.rule: separate plain paths from extended (path+skips) rules
+--Returns: { plain_rules={path1,path2,...}, extended={ {path="/legacy/", skips={...}} } }
+local function parse_whiteurl_extended(entry)
+    local cached = worker_whiteurl_cache[entry]
+    local now = ngx.time()
+    if cached and cached.mtime == entry.mtime and (now - cached.last_check) < RULE_CACHE_TTL then
+        return cached
+    end
+
+    local plain_rules = {}
+    local extended = {}
+    for _, line in ipairs(entry.rules) do
+        local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+        if trimmed ~= "" and trimmed:sub(1, 1) ~= "#" then
+            -- try to split path and optional skip list
+            local path, skip_str = trimmed:match("^(%S+)%s+(.+)$")
+            if path and skip_str then
+                -- extended format: /path/ check1,check2,...
+                local skips = {}
+                for check_name in skip_str:gmatch("([^,]+)") do
+                    check_name = check_name:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+                    if WHITEURL_SKIP_VALID[check_name] then
+                        skips[check_name] = true
+                    end
+                end
+                if next(skips) ~= nil then
+                    table.insert(extended, { path = path, skips = skips })
+                else
+                    -- invalid skip list, treat as plain path
+                    table.insert(plain_rules, path)
+                end
+            else
+                -- plain format: /path/ (no skip list, default: skip url_attack only)
+                table.insert(plain_rules, trimmed)
+            end
+        end
+    end
+
+    cached = {
+        mtime = entry.mtime,
+        plain_rules = plain_rules,
+        extended = extended,
+        last_check = now,
+    }
+    worker_whiteurl_cache[entry] = cached
+    return cached
+end
+
 local function white_url_check()
     if cfg("white_url_check") == "on" then
         local entry = get_rule_entry('whiteurl.rule')
@@ -230,34 +290,66 @@ local function white_url_check()
         local REQ_PATH = var.uri or var.request_uri
         local FULL_REQ_URI = var.request_uri
 
-        local function matches_whiteurl(target)
-            if target == nil then
-                return false
-            end
-            -- Check plain-string rules first (fast path, no regex)
-            if entry.fast_hash then
-                for _, rule in ipairs(entry.fast_rules) do
-                    if string_find(target, rule, 1, true) then
-                        return true
+        -- Parse extended format (path + optional skip checks)
+        local parsed = parse_whiteurl_extended(entry)
+
+        -- Check extended rules first (longest match priority)
+        if REQ_PATH and #parsed.extended > 0 then
+            local best_skips = nil
+            local best_len = 0
+            for _, rule in ipairs(parsed.extended) do
+                local rp = rule.path
+                if #REQ_PATH >= #rp and string.sub(REQ_PATH, 1, #rp) == rp then
+                    if #rp > best_len then
+                        best_skips = rule.skips
+                        best_len = #rp
                     end
                 end
             end
-            -- Fall back to regex for complex whitelist patterns
+            if best_skips then
+                return best_skips  -- return the skip config table
+            end
+            -- also check full URI for extended rules with query strings
+            if FULL_REQ_URI and FULL_REQ_URI ~= REQ_PATH then
+                for _, rule in ipairs(parsed.extended) do
+                    local rp = rule.path
+                    if #FULL_REQ_URI >= #rp and string.sub(FULL_REQ_URI, 1, #rp) == rp then
+                        if #rp > best_len then
+                            best_skips = rule.skips
+                            best_len = #rp
+                        end
+                    end
+                end
+                if best_skips then
+                    return best_skips
+                end
+            end
+        end
+
+        -- Check plain rules (string.find, fast path)
+        local function matches_plain(target)
+            if target == nil then return false end
+            for _, rule in ipairs(parsed.plain_rules) do
+                if string_find(target, rule, 1, true) then
+                    return true
+                end
+            end
+            -- Fall back to regex for complex whitelist patterns (from entry.combined)
             if entry.combined ~= nil and rulematch(target, entry.combined, "joi") then
                 return true
             end
             return false
         end
 
-        -- Path allowlist is the common case, so match URI path first.
-        if matches_whiteurl(REQ_PATH) then
-            return true
+        -- Plain rules: default behavior = skip url_attack only
+        if matches_plain(REQ_PATH) then
+            return { url_attack = true }
         end
-        -- Preserve compatibility for existing rules that intentionally include query strings.
-        if FULL_REQ_URI ~= nil and FULL_REQ_URI ~= REQ_PATH and matches_whiteurl(FULL_REQ_URI) then
-            return true
+        if FULL_REQ_URI ~= nil and FULL_REQ_URI ~= REQ_PATH and matches_plain(FULL_REQ_URI) then
+            return { url_attack = true }
         end
     end
+    return false
 end
 
 --check if UA is whitelisted (search engine bots skip UA blacklist only)
@@ -859,17 +951,14 @@ local function waf_main()
     if black_ip_check() then
         return
     end
-    -- whiteurl.rule: only skip url_attack_check (URL path detection).
-    -- All other checks (UA, Referer, CC, file upload, args, cookie, POST) still run.
-    local is_white_url = white_url_check()
+    -- whiteurl.rule: per-URL skip checks
+    -- Returns: false (no match) or table of skip check names
+    -- Plain format (/path/) defaults to {url_attack=true}
+    -- Extended format (/path/ user_agent,referer,...) skips specified checks
+    local url_skips = white_url_check()
     -- Determine request type early (used for multiple short-circuits below)
     local METHOD = req_get_method()
     local is_bodyless = is_bodyless_method(METHOD)
-
-    -- urlskip.rule: per-URL configurable skip checks
-    -- e.g. /legacy/ user_agent,referer,url_attack,url_args
-    -- Skipped checks are resolved here, all others run normally.
-    local url_skips = get_url_skip_config()
 
     -- Request-type checks (url_skips can skip individual checks)
     if not (url_skips and url_skips.user_agent) then
@@ -898,9 +987,9 @@ local function waf_main()
         end
     end
 
-    -- White-listed URL or urlskip url_attack: skip url_attack_check (URL path pattern detection).
-    -- url_args_check, cookie_check, post_check still apply.
-    if not is_white_url and not (url_skips and url_skips.url_attack) then
+    -- White-listed URL: skip url_attack_check if configured.
+    -- url_args_check, cookie_check, post_check still apply unless explicitly skipped.
+    if not (url_skips and url_skips.url_attack) then
         if url_attack_check() then
             return
         end
