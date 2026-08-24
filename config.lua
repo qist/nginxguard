@@ -15,9 +15,9 @@ config_trust_proxy_headers = "on"
 --Supports: IPv4 CIDR (1.180.27.0/24), IPv6 CIDR (2001:db8::/32), wildcards (192.168.*), exact IPs
 --Hot-reloaded via mtime check, no restart needed.
 --log dir
-config_log_dir = "/opt/nginx/log/"
+config_log_dir = "/apps/nginx/log/"
 --rule setting
-config_rule_dir = "/opt/nginx/lua/waf/rule-config"
+config_rule_dir = "/apps/nginx/conf/waf/rule-config"
 --enable/disable white url (url path allowlist, supports optional per-URL skip checks)
 config_white_url_check = "on"
 --enable/disable white ip
