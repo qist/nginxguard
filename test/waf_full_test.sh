@@ -372,10 +372,20 @@ $SSH180 "$NGINX_CMD -s reload 2>&1"
 sleep 2
 echo "" | tee -a $RESULTS
 
-# 11. 白名单 URL
-echo -e "${CYAN}=== 11. 白名单 URL ===${NC}" | tee -a $RESULTS
+# 11. 白名单 URL (只跳过 url_check, 其他检测仍执行)
+echo -e "${CYAN}=== 11. 白名单 URL (只跳过url_check) ===${NC}" | tee -a $RESULTS
+# 白名单URL正常请求: 放行 (404=nginx找不到文件)
 code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" "$TARGET/123/")
-if [ "$code" != "403" ]; then ok "White URL /123/" "$code"; else bad "White URL /123/" "$code" "non-403"; fi
+if [ "$code" != "403" ]; then ok "White URL /123/ 正常请求放行" "$code"; else bad "White URL /123/ 正常请求" "$code" "non-403"; fi
+# 白名单URL + 恶意UA: 应拦截 (UA检测仍执行)
+code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -A "Go-http-client/2.0" "$TARGET/123/")
+if [ "$code" = "403" ]; then ok "White URL /123/ + 恶意UA拦截" "$code"; else bad "White URL /123/ + 恶意UA应拦截" "$code" "403"; fi
+# 白名单URL + URL参数SQL注入: 应拦截 (args检测仍执行)
+code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" "$TARGET/123/?id=1+union+select+1")
+if [ "$code" = "403" ]; then ok "White URL /123/ + SQLi参数拦截" "$code"; else bad "White URL /123/ + SQLi参数应拦截" "$code" "403"; fi
+# 白名单URL + POST SQL注入: 应拦截 (POST检测仍执行)
+code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -d "id=1+union+select+1" "$TARGET/123/")
+if [ "$code" = "403" ]; then ok "White URL /123/ + POST SQLi拦截" "$code"; else bad "White URL /123/ + POST SQLi应拦截" "$code" "403"; fi
 echo "" | tee -a $RESULTS
 
 # 12. Referer (off)

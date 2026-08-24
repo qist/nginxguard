@@ -859,11 +859,9 @@ local function waf_main()
     if black_ip_check() then
         return
     end
-    -- whiteurl.rule is intended as a request-path allowlist. If the current
-    -- request matches, skip the remaining UA/URL/Args/Cookie/POST checks.
-    if white_url_check() then
-        return
-    end
+    -- whiteurl.rule: only skip url_attack_check (URL path detection).
+    -- All other checks (UA, Referer, CC, file upload, args, cookie, POST) still run.
+    local is_white_url = white_url_check()
     -- Determine request type early (used for multiple short-circuits below)
     local METHOD = req_get_method()
     local is_bodyless = is_bodyless_method(METHOD)
@@ -887,8 +885,12 @@ local function waf_main()
         end
     end
 
-    if url_attack_check() then
-        return
+    -- White-listed URL: skip url_attack_check only (URL path pattern detection).
+    -- url_args_check, cookie_check, post_check still apply.
+    if not is_white_url then
+        if url_attack_check() then
+            return
+        end
     end
     if url_args_attack_check() then
         return
