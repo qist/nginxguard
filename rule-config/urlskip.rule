@@ -17,4 +17,4 @@
 # 修改后自动热加载 (10秒内生效,无需重启nginx)
 #
 # 示例:
-/legacy/ user_agent,referer,url_attack,url_args
+# /legacy/ user_agent,referer,url_attack,url_args

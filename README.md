@@ -76,7 +76,8 @@ waf/
     ├── url.rule            # 全局 URL 规则
     ├── useragent.rule      # 全局 User-Agent 规则
     ├── whiteip.rule        # 全局白名单 IP（支持 IPv4/IPv6 CIDR/通配符/精确IP）
-    ├── whiteurl.rule       # 全局白名单 URL
+    ├── whiteurl.rule       # 全局白名单 URL（仅跳过 URL 路径检测）
+    ├── urlskip.rule        # 全局 URL 级跳过规则（按路径配置跳过指定检测项）
     ├── whiteua.rule        # 全局白名单 UA（搜索引擎爬虫）
     ├── referer.rule        # 全局 Referer 规则
     ├── fileext.rule        # 全局文件上传扩展名规则
@@ -89,7 +90,8 @@ waf/
             ├── url.rule           # URL路径攻击规则
             ├── useragent.rule     # User-Agent攻击规则
             ├── whiteip.rule       # 白名单IP（支持 IPv4/IPv6 CIDR/通配符/精确IP，空文件=无白名单）
-            ├── whiteurl.rule      # URL白名单
+            ├── whiteurl.rule      # URL白名单（仅跳过 URL 路径检测）
+            ├── urlskip.rule       # URL级跳过规则（按路径配置跳过指定检测项）
             ├── whiteua.rule       # UA白名单（搜索引擎爬虫放行）
             ├── referer.rule       # Referer攻击规则
             └── fileext.rule       # 文件上传扩展名规则
@@ -153,7 +155,8 @@ waf/
 | `log_dir` | WAF 日志目录（绝对路径） | `config_log_dir` |
 | `rule_dir` | 全局规则文件目录（绝对路径），域名级可用 `rule_dir` 覆盖 | `config_rule_dir` |
 | `trust_proxy_headers` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=NginxGuard 在 CDN/反代后，根据 `cdnip.rule` 判断是否信任转发头：`remote_addr` 在 `cdnip.rule` 中才信任 XFF，不在则用 `remote_addr` 防伪造；`cdnip.rule` 不存在或为空则信任所有 XFF（原始方案，存在伪造风险）。`"off"`=NginxGuard 直接暴露公网，只用 `remote_addr` 防伪造 | `config_trust_proxy_headers` |
-| `white_url_check` | 白名单 URL 检测 | `config_white_url_check` |
+| `white_url_check` | 白名单 URL 检测（仅跳过 URL 路径检测，其他检测仍执行） | `config_white_url_check` |
+| `url_skip_check` | URL 级跳过规则检测（`urlskip.rule`，按路径配置跳过指定检测项） | `config_url_skip_check` |
 | `white_ua_check` | 白名单 UA 检测（搜索引擎爬虫放行，仅跳过 UA 黑名单检测，不影响 URL/POST/CC 等其他检测） | `config_white_ua_check` |
 | `white_ip_check` | 白名单 IP 检测 | `config_white_ip_check` |
 | `black_ip_check` | 黑名单 IP 检测 | `config_black_ip_check` |
@@ -197,7 +200,8 @@ waf/
 |---------|---------|------|
 | `whiteip.rule` | `white_ip_check()` | IP 白名单（支持 IPv4/IPv6/通配符） |
 | `blackip.rule` | `black_ip_check()` | IP 黑名单（支持 IPv4/IPv6/通配符） |
-| `whiteurl.rule` | `white_url_check()` | URL 白名单 |
+| `whiteurl.rule` | `white_url_check()` | URL 白名单（仅跳过 URL 路径检测） |
+| `urlskip.rule` | `get_url_skip_config()` | URL 级跳过规则（按路径配置跳过指定检测项） |
 | `whiteua.rule` | `user_agent_attack_check()` 内部调用 `is_white_ua()` | UA 白名单（搜索引擎爬虫放行，仅跳过 UA 黑名单检测） |
 | `url.rule` | `url_attack_check()` | URL 路径攻击检测 |
 | `args.rule` | `url_args_attack_check()` | URL 参数攻击检测 |
@@ -619,6 +623,81 @@ NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存�
 
 这样设计可以防止攻击者伪造搜索引擎 UA 来绕过 NginxGuard 的其他安全检测。
 
+### 白名单 URL 安全说明
+
+`whiteurl.rule` 中的白名单 URL **仅跳过 URL 路径检测**（`url.rule`），不会跳过其他任何安全检测：
+
+| 检测项 | 白名单 URL 是否跳过 |
+|--------|:----------------:|
+| URL 路径检测 (`url.rule`) | ✅ 跳过 |
+| User-Agent 黑名单 (`useragent.rule`) | ❌ 仍检测 |
+| URL 参数检测 (`args.rule`) | ❌ 仍检测 |
+| POST 攻击检测 (`post.rule`) | ❌ 仍检测 |
+| CC 攻击检测 | ❌ 仍检测 |
+| Cookie 检测 (`cookie.rule`) | ❌ 仍检测 |
+| 文件上传检测 (`fileext.rule`) | ❌ 仍检测 |
+| Referer 检测 (`referer.rule`) | ❌ 仍检测 |
+| IP 黑白名单 | ❌ 仍检测 |
+
+> **注意**：旧版本白名单 URL 会跳过所有检测，存在安全风险。当前版本已修复，仅跳过 URL 路径检测。如需跳过更多检测项，请使用 `urlskip.rule`。
+
+### URL 级跳过规则（urlskip.rule）
+
+`urlskip.rule` 提供**按 URL 路径配置跳过指定检测项**的能力，比 `whiteurl.rule` 更精细。可针对不同路径跳过不同的检测组合。
+
+#### 配置格式
+
+纯文本格式，每行一条规则，`#` 开头为注释：
+
+```
+# 格式: <路径前缀> <跳过的检测项>(逗号分隔)
+# 路径匹配方式: 前缀匹配（最长匹配优先）
+
+/legacy/ user_agent,referer,url_attack,url_args
+/api/old/ post,cookie
+/static/ url_attack,url_args,cookie,post
+```
+
+#### 可用检测项
+
+| 检测项 | 说明 | 对应规则文件 |
+|--------|------|-------------|
+| `user_agent` | User-Agent 检测 | `useragent.rule` |
+| `referer` | Referer 检测 | `referer.rule` |
+| `url_attack` | URL 路径检测 | `url.rule` |
+| `url_args` | URL 参数检测 | `args.rule` |
+| `cookie` | Cookie 检测 | `cookie.rule` |
+| `post` | POST body 检测 | `post.rule` |
+| `file_upload` | 文件上传扩展名检测 | `fileext.rule` |
+| `cc` | CC 攻击限速检测 | — |
+
+#### 特性
+
+- 全局开关 `config_url_skip_check`，默认 `"on"`，支持域名级覆盖
+- 前缀匹配，**最长匹配优先**（`/legacy/api/` 优先于 `/legacy/`）
+- worker 级缓存 + mtime 热加载（修改后 10 秒内生效，无需重启 nginx）
+- 支持域名级独立配置：`domains/域名/urlskip.rule`
+
+#### 使用示例
+
+**场景：旧版 API 放行 UA 和 URL 检测，但保留 POST/Cookie 检测**
+
+```bash
+# rule-config/urlskip.rule
+/legacy/ user_agent,referer,url_attack,url_args
+```
+
+效果：
+
+| 请求 | 检测项 | 行为 |
+|------|--------|------|
+| `/legacy/` + sqlmap UA | user_agent | ✅ 跳过，放行 |
+| `/legacy/etc/passwd` | url_attack | ✅ 跳过，放行 |
+| `/legacy/?id=union+select` | url_args | ✅ 跳过，放行 |
+| `/legacy/` + POST SQL注入 | post | ❌ 仍检测，拦截 |
+| `/legacy/` + Cookie XSS | cookie | ❌ 仍检测，拦截 |
+| `/other/` + sqlmap UA | user_agent | ❌ 不匹配，仍检测 |
+
 ---
 
 ## 日志
@@ -800,7 +879,9 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
        ↓
 5. black_ip_check     → 静态黑名单 IP
        ↓
-6. white_url_check    → 白名单 URL 放行
+6. white_url_check    → 白名单 URL（仅跳过后续 url_attack_check）
+       ↓
+6a. url_skip_config  → URL 级跳过规则（按 urlskip.rule 配置跳过指定检测项）
        ↓
 7. user_agent_check   → User-Agent 攻击（白名单 UA 跳过此项）
        ↓
