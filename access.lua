@@ -326,11 +326,12 @@ local function white_url_check()
             end
         end
 
-        -- Check plain rules (string.find, fast path)
+        -- Check plain rules (prefix match, same as extended format)
         local function matches_plain(target)
             if target == nil then return false end
             for _, rule in ipairs(parsed.plain_rules) do
-                if string_find(target, rule, 1, true) then
+                -- prefix match: target starts with rule path
+                if #target >= #rule and string.sub(target, 1, #rule) == rule then
                     return true
                 end
             end
