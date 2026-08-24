@@ -866,45 +866,64 @@ local function waf_main()
     local METHOD = req_get_method()
     local is_bodyless = is_bodyless_method(METHOD)
 
-    -- Request-type checks (always run)
-    if user_agent_attack_check() then
-        return
+    -- urlskip.rule: per-URL configurable skip checks
+    -- e.g. /legacy/ user_agent,referer,url_attack,url_args
+    -- Skipped checks are resolved here, all others run normally.
+    local url_skips = get_url_skip_config()
+
+    -- Request-type checks (url_skips can skip individual checks)
+    if not (url_skips and url_skips.user_agent) then
+        if user_agent_attack_check() then
+            return
+        end
     end
-    if referer_check() then
-        return
+    if not (url_skips and url_skips.referer) then
+        if referer_check() then
+            return
+        end
     end
-    if cc_attack_check() then
-        return
+    if not (url_skips and url_skips.cc) then
+        if cc_attack_check() then
+            return
+        end
     end
 
     -- OPTIMIZATION 1: request-type short-circuit
     -- GET/HEAD/OPTIONS skip file_upload and post checks (controlled by bodyless config)
     if not is_bodyless then
-        if file_upload_check() then
-            return
+        if not (url_skips and url_skips.file_upload) then
+            if file_upload_check() then
+                return
+            end
         end
     end
 
-    -- White-listed URL: skip url_attack_check only (URL path pattern detection).
+    -- White-listed URL or urlskip url_attack: skip url_attack_check (URL path pattern detection).
     -- url_args_check, cookie_check, post_check still apply.
-    if not is_white_url then
+    if not is_white_url and not (url_skips and url_skips.url_attack) then
         if url_attack_check() then
             return
         end
     end
-    if url_args_attack_check() then
-        return
+    if not (url_skips and url_skips.url_args) then
+        if url_args_attack_check() then
+            return
+        end
     end
 
     -- Cookie check: moved after URL/Args so short-circuit saves 1 regex on attack
     -- GET Cookie attacks exist (XSS injection via cookie), so we still check all methods
-    if cookie_attack_check() then
-        return
+    if not (url_skips and url_skips.cookie) then
+        if cookie_attack_check() then
+            return
+        end
     end
 
     if not is_bodyless then
-        if post_attack_check() then
-            return
+        if not (url_skips and url_skips.post) then
+            if post_attack_check() then
+                return
+            end
         end
     end
 end

@@ -1079,6 +1079,108 @@ end
 function flush_waf_logs()
 end
 
+--===========================================================================
+--URL-level skip config: urlskip.rule
+--Text format, one rule per line: <path_prefix> <skip_checks>
+--skip_checks is comma-separated: user_agent,referer,url_attack,url_args,cookie,post,file_upload,cc
+--Lines starting with # are comments
+--Supports per-domain rule_dir override
+--Hot-reloaded via mtime check (same as other .rule files)
+--===========================================================================
+
+--Valid skip check names
+local URL_SKIP_VALID = {
+    user_agent = true,
+    referer = true,
+    url_attack = true,
+    url_args = true,
+    cookie = true,
+    post = true,
+    file_upload = true,
+    cc = true,
+}
+
+--Worker-level cache for parsed urlskip.rule
+--key: filepath → { mtime=, parsed=table, last_check=timestamp }
+--parsed = array of { path=string, skips=table (set of check names) }
+local worker_urlskip_cache = {}
+
+--Parse urlskip.rule content into structured table
+--Returns: array of { path="/legacy/", skips={user_agent=true, url_attack=true, ...} }
+local function parse_urlskip_rules(content)
+    local result = {}
+    for line in content:gmatch("[^\r\n]+") do
+        -- trim leading/trailing whitespace
+        line = line:gsub("^%s+", ""):gsub("%s+$", "")
+        -- skip comments and empty lines
+        if line ~= "" and line:sub(1, 1) ~= "#" then
+            -- split into path and skip list (first space separates them)
+            local path, skip_str = line:match("^(%S+)%s+(.+)$")
+            if path and skip_str then
+                local skips = {}
+                for check_name in skip_str:gmatch("([^,]+)") do
+                    check_name = check_name:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+                    if URL_SKIP_VALID[check_name] then
+                        skips[check_name] = true
+                    end
+                end
+                if next(skips) ~= nil then
+                    table.insert(result, { path = path, skips = skips })
+                end
+            end
+        end
+    end
+    return result
+end
+
+--Get URL skip config for current request path
+--Returns: table of skip check names (e.g. {user_agent=true, url_attack=true}), or nil
+function get_url_skip_config()
+    if get_effective_config("url_skip_check") ~= "on" then return nil end
+    local entry = get_rule_entry('urlskip.rule')
+    if entry == nil or entry.empty then return nil end
+
+    -- check worker cache
+    local cached = worker_urlskip_cache[entry]
+    local now = ngx.time()
+    if cached and cached.mtime == entry.mtime and (now - cached.last_check) < RULE_CACHE_TTL then
+        -- fall through to match logic below
+    else
+        -- re-parse from raw rules
+        local content = table.concat(entry.rules, "\n")
+        local parsed = parse_urlskip_rules(content)
+        worker_urlskip_cache[entry] = {
+            mtime = entry.mtime,
+            parsed = parsed,
+            last_check = now,
+        }
+        cached = worker_urlskip_cache[entry]
+    end
+
+    if cached == nil or cached.parsed == nil or #cached.parsed == 0 then
+        return nil
+    end
+
+    -- match request path against prefixes (longest match first for specificity)
+    local REQ_PATH = var.uri or var.request_uri
+    if REQ_PATH == nil then return nil end
+
+    local best_match = nil
+    local best_len = 0
+    for _, rule in ipairs(cached.parsed) do
+        local rp = rule.path
+        -- prefix match: request path starts with rule path
+        if #REQ_PATH >= #rp and string.sub(REQ_PATH, 1, #rp) == rp then
+            if #rp > best_len then
+                best_match = rule.skips
+                best_len = #rp
+            end
+        end
+    end
+
+    return best_match
+end
+
 --NginxGuard return (supports per-domain output config)
 function waf_output()
     local output_mode = get_effective_config("waf_output")

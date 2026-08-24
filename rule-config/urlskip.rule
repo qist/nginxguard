@@ -1,0 +1,20 @@
+# URL级跳过规则配置 (urlskip.rule)
+# 格式: <路径前缀> <跳过的检测项>(逗号分隔)
+#
+# 可用检测项:
+#   user_agent   - User-Agent 检测 (useragent.rule)
+#   referer      - Referer 检测 (referer.rule)
+#   url_attack   - URL路径检测 (url.rule)
+#   url_args     - URL参数检测 (args.rule)
+#   cookie       - Cookie 检测 (cookie.rule)
+#   post         - POST body 检测 (post.rule)
+#   file_upload  - 文件上传扩展名检测 (fileext.rule)
+#   cc           - CC攻击限速检测
+#
+# 以 # 开头的行为注释,空行忽略
+# 路径匹配方式: 前缀匹配 (最长匹配优先)
+# 支持每域名独立配置: domains/域名/urlskip.rule
+# 修改后自动热加载 (10秒内生效,无需重启nginx)
+#
+# 示例:
+/legacy/ user_agent,referer,url_attack,url_args
