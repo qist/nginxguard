@@ -649,6 +649,9 @@ NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存�
 ```
 /legacy/ user_agent,referer,url_attack,url_args
 /api/old/ post,cookie
+
+# 正则路径（$ 锚定末尾，精确匹配）
+/ipinfo$ user_agent
 ```
 
 扩展格式在路径后加空格和逗号分隔的检测项名称，可精确控制跳过哪些检测：
@@ -666,7 +669,8 @@ NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存�
 
 #### 特性
 
-- 路径匹配方式：**前缀匹配，最长匹配优先**（`/legacy/api/` 优先于 `/legacy/`）
+- 路径匹配方式：**纯路径用前缀匹配，含正则元字符的路径自动用正则匹配**，最长匹配优先（`/legacy/api/` 优先于 `/legacy/`）
+- 支持正则路径：`/ipinfo$`（精确匹配）、`/api/v[0-9]+/`（版本号匹配）等
 - worker 级缓存 + mtime 热加载（修改后 10 秒内生效，无需重启 nginx）
 - 支持域名级独立配置：`domains/域名/whiteurl.rule`
 - `#` 开头为注释，空行忽略
@@ -695,6 +699,20 @@ NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存�
 | `/legacy/` + POST SQL注入 | post | ❌ 仍检测，拦截 |
 | `/legacy/` + Cookie XSS | cookie | ❌ 仍检测，拦截 |
 | `/other/` + sqlmap UA | — | ❌ 不匹配，仍检测 |
+
+**场景 3：正则路径精确匹配**
+```bash
+# rule-config/whiteurl.rule
+/ipinfo$ user_agent
+```
+
+效果：
+
+| 请求 | 检测项 | 行为 |
+|------|--------|------|
+| `/ipinfo` + Go-http-client | user_agent | ✅ 跳过，放行 |
+| `/ipinfo/detail` + sqlmap UA | — | ❌ 不匹配（`$` 锚定末尾），仍检测 |
+| `/ipinfo` + URL 路径攻击 | url_attack | ❌ 仍检测 |
 
 ---
 
