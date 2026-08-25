@@ -235,8 +235,13 @@ local WHITEURL_SKIP_VALID = {
 --Worker-level cache for parsed whiteurl.rule (extended format)
 local worker_whiteurl_cache = {}
 
+--Check if a string contains regex metacharacters
+local function has_regex_metachar(s)
+    return s:find("[()%.%[%]%*%+%?%^%$|\\]") ~= nil
+end
+
 --Parse whiteurl.rule: separate plain paths from extended (path+skips) rules
---Returns: { plain_rules={path1,path2,...}, extended={ {path="/legacy/", skips={...}} } }
+--Returns: { plain_rules={path1,path2,...}, extended={ {path="/legacy/", skips={...}, is_regex=bool} } }
 local function parse_whiteurl_extended(entry)
     local cached = worker_whiteurl_cache[entry]
     local now = ngx.time()
@@ -261,7 +266,11 @@ local function parse_whiteurl_extended(entry)
                     end
                 end
                 if next(skips) ~= nil then
-                    table.insert(extended, { path = path, skips = skips })
+                    table.insert(extended, {
+                        path = path,
+                        skips = skips,
+                        is_regex = has_regex_metachar(path),
+                    })
                 else
                     -- invalid skip list, treat as plain path
                     table.insert(plain_rules, path)
@@ -294,16 +303,26 @@ local function white_url_check()
         local parsed = parse_whiteurl_extended(entry)
 
         -- Check extended rules first (longest match priority)
+        -- For plain paths: use prefix match (string.sub)
+        -- For regex paths (e.g. /ipinfo$): use ngx.re.find
         if REQ_PATH and #parsed.extended > 0 then
             local best_skips = nil
             local best_len = 0
             for _, rule in ipairs(parsed.extended) do
                 local rp = rule.path
-                if #REQ_PATH >= #rp and string.sub(REQ_PATH, 1, #rp) == rp then
-                    if #rp > best_len then
-                        best_skips = rule.skips
-                        best_len = #rp
+                local matched = false
+                if rule.is_regex then
+                    -- regex path: use ngx.re.find (anchored at start via ^ in pattern)
+                    matched = rulematch(REQ_PATH, rp, "joi") ~= nil
+                else
+                    -- plain path: prefix match
+                    if #REQ_PATH >= #rp and string.sub(REQ_PATH, 1, #rp) == rp then
+                        matched = true
                     end
+                end
+                if matched and #rp > best_len then
+                    best_skips = rule.skips
+                    best_len = #rp
                 end
             end
             if best_skips then
@@ -313,11 +332,17 @@ local function white_url_check()
             if FULL_REQ_URI and FULL_REQ_URI ~= REQ_PATH then
                 for _, rule in ipairs(parsed.extended) do
                     local rp = rule.path
-                    if #FULL_REQ_URI >= #rp and string.sub(FULL_REQ_URI, 1, #rp) == rp then
-                        if #rp > best_len then
-                            best_skips = rule.skips
-                            best_len = #rp
+                    local matched = false
+                    if rule.is_regex then
+                        matched = rulematch(FULL_REQ_URI, rp, "joi") ~= nil
+                    else
+                        if #FULL_REQ_URI >= #rp and string.sub(FULL_REQ_URI, 1, #rp) == rp then
+                            matched = true
                         end
+                    end
+                    if matched and #rp > best_len then
+                        best_skips = rule.skips
+                        best_len = #rp
                     end
                 end
                 if best_skips then

@@ -19,9 +19,11 @@
 #   file_upload  - 文件上传扩展名检测 (fileext.rule)
 #   cc           - CC攻击限速检测
 #
-# 路径匹配: 前缀匹配 (最长匹配优先)
+# 路径匹配: 纯路径用前缀匹配(最长匹配优先),含正则元字符的路径用正则匹配
+# 支持正则: /ipinfo$ (精确匹配), /api/v[0-9]+/ (版本号匹配) 等
 # 以 # 开头为注释,空行忽略
 # 修改后自动热加载 (10秒内生效,无需重启nginx)
 
 /123/
 /legacy/ user_agent,referer,url_attack,url_args
+/ipinfo$ user_agent
