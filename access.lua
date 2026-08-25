@@ -378,31 +378,14 @@ local function white_url_check()
     return false
 end
 
---check if UA is whitelisted (search engine bots skip UA blacklist only)
---whiteua.rule contains 50 plain-string bot names (Googlebot, bingbot, etc.)
+--check if UA is whitelisted (skip UA blacklist if UA matches whiteua.rule)
+--whiteua.rule contains plain-string bot names (Googlebot, bingbot, etc.)
 --Uses string.find (plain mode) instead of ngx.re.find for each entry
 --This avoids PCRE JIT overhead for simple substring matching
---OPTIMIZATION: bloom-filter style pre-check — only run 50 string.find calls
---if UA contains none of the common bot markers (bot/spider/crawl/etc.)
---This skips the full loop for 99% of normal traffic
-local BOT_MARKERS = { "bot", "spider", "crawl", "slurp", "archiver", "feed", "index" }
 local function is_white_ua()
     if cfg("white_ua_check") == "on" then
         local USER_AGENT = var.http_user_agent
         if USER_AGENT ~= nil then
-            -- OPTIMIZATION: quick bloom-filter check before full 50-rule scan
-            -- If UA doesn't contain any bot marker, skip the full loop
-            local ua_lower = string.lower(USER_AGENT)
-            local has_bot_marker = false
-            for _, marker in ipairs(BOT_MARKERS) do
-                if string_find(ua_lower, marker, 1, true) then
-                    has_bot_marker = true
-                    break
-                end
-            end
-            if not has_bot_marker then
-                return false
-            end
             local entry = get_rule_entry('whiteua.rule')
             if entry == nil or entry.empty then return false end
             -- Fast path: plain-string rules via string.find
