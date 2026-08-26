@@ -1,4 +1,4 @@
-\.(htaccess|bash_history|config|env|ini|log|sh|sql|bak|inc|old|mdb|sql|backup|java|class|tgz|swp|tmp|db|sqlite)
+\.(htaccess|bash_history|config|env|ini|log|sh|sql|bak|inc|old|mdb|backup|java|class|tgz|swp|tmp|db|sqlite)($|/|\?)
 \.(svn|git)\/
 \/\.git\/
 \/\.svn\/
