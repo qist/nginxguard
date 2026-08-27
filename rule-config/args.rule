@@ -20,7 +20,7 @@ group\s+by.+\(
 xwork\.MethodAccessor
 (?:define|eval|file_get_contents|include|require|require_once|shell_exec|phpinfo|system|passthru|preg_\w+|execute|(fp)open|alert|showmodaldialog)\(
 (gopher|doc|php|glob|file|phar|zlib|ftp|ldap|dict|ogg|data)\:\/
-java\.lang
+java\.lang\.(Runtime|ProcessBuilder|ScriptEngine|ClassLoader)
 \$_(?i:GET|post|cookie|files|session|env|phplib|GLOBALS|SERVER)\[
 \<(iframe|script|body|img|layer|div|meta|style|base|object|input|svg)
 (onmouseover|onerror|onload)\=
