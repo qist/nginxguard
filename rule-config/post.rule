@@ -32,7 +32,7 @@ proc\/self\/environ
 mosconfig\[[a-z0-9_]{1,200}\]=
 (?i:cmd|command|exec|execute|shell|terminal|console|powershell|pwsh)=[^&\s]{0,10}(ls|cat|whoami|id|uname|ifconfig|netstat|wget|curl|nc|ncat|bash|chmod|chown|kill|rm|sudo|su)(\s|$|;|&|\|)
 (?i:(?:perl|python|ruby|tcl)\s+-[eich]|(?:perl|python|ruby|tcl)\s+\/(?:tmp|dev|var|home|root|proc|etc)|exec\s+(?:perl|python|ruby|tcl))
-(?i:alert|confirm|prompt)\s*\(
+(?i:<script[^>]*>.*alert|<script[^>]*>.*confirm|<script[^>]*>.*prompt|javascript:alert|javascript:confirm|javascript:prompt)
 javascript\:
 vbscript\:
 document\.cookie
