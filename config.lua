@@ -32,6 +32,8 @@ config_url_check = "on"
 config_url_args_check = "on"
 --enable/disable user agent filtering
 config_user_agent_check = "on"
+--enable/disable request header filtering (header.rule)
+config_header_check = "on"
 --enable/disable cookie deny filtering
 config_cookie_check = "on"
 --enable/disable cc filtering

@@ -521,9 +521,13 @@ local function read_rule_file(filepath)
     local content = f:read("*a")
     f:close()
 
+    -- Skip blank lines and comment lines (starting with #) so that
+    -- descriptive comments in .rule files are never treated as patterns
     local t = {}
     for line in content:gmatch("[^\r\n]+") do
-        table.insert(t, line)
+        if line ~= "" and not string.find(line, "^%s*#") then
+            table.insert(t, line)
+        end
     end
 
     -- Build combined alternation pattern for fast matching

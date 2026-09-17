@@ -123,7 +123,7 @@ end
 --=========================================================================
 local CONFIG_KEYS = {
     "waf_enable", "white_ip_check", "black_ip_check", "white_url_check",
-    "white_ua_check", "user_agent_check", "url_check", "url_args_check",
+    "white_ua_check", "user_agent_check", "header_check", "url_check", "url_args_check",
     "cookie_check", "cc_check", "cc_rate", "cc_block_ttl",
     "post_check", "referer_check", "file_upload_check", "trust_proxy_headers",
     "multipart_streaming_check", "upload_filename_scan_limit", "post_body_scan_limit",
@@ -224,11 +224,11 @@ end
 --whiteurl.rule supports two formats:
 --  /path/                          -> default: skip url_attack only
 --  /path/ user_agent,referer,...    -> skip specified checks
---Available skip checks: user_agent,referer,url_attack,url_args,cookie,post,file_upload,cc
+--Available skip checks: user_agent,header,referer,url_attack,url_args,cookie,post,file_upload,cc
 --Lines starting with # are comments
 --Uses string.find (plain mode) for path matching to avoid PCRE JIT overhead
 local WHITEURL_SKIP_VALID = {
-    user_agent = true, referer = true, url_attack = true, url_args = true,
+    user_agent = true, header = true, referer = true, url_attack = true, url_args = true,
     cookie = true, post = true, file_upload = true, cc = true,
 }
 
@@ -654,6 +654,61 @@ local function user_agent_attack_check()
     return false
 end
 
+--Build a "Name: value" text block from all request headers (per-request cached)
+--Used by header.rule detection; returns nil when the request has no headers
+local function get_header_text()
+    local ctx = ngx.ctx
+    local cached = ctx._hdr_text
+    if cached ~= nil then
+        if cached == false then return nil end
+        return cached
+    end
+    local hdrs = ngx.req.get_headers(0)
+    local text = nil
+    if hdrs ~= nil then
+        local parts = {}
+        for name, value in pairs(hdrs) do
+            local name_s = tostring(name)
+            if type(value) == "table" then
+                for _, v in ipairs(value) do
+                    parts[#parts + 1] = name_s .. ": " .. tostring(v)
+                end
+            else
+                parts[#parts + 1] = name_s .. ": " .. tostring(value)
+            end
+        end
+        if #parts > 0 then
+            text = table_concat(parts, "\n")
+        end
+    end
+    ctx._hdr_text = text or false
+    return text
+end
+
+--deny malicious / bypass request headers (header.rule)
+--Input is the "Name: value" block; matching uses multiline flags ("joim")
+--so rules can anchor a header name with ^
+local function header_attack_check()
+    if cfg("header_check") == "on" then
+        local header_entry = get_rule_entry('header.rule')
+        if header_entry == nil or header_entry.empty then
+            return false
+        end
+        local HEADER_TEXT = get_header_text()
+        if HEADER_TEXT ~= nil then
+            local matched = match_rule_entry(header_entry, HEADER_TEXT, "joim")
+            if matched then
+                log_record('Deny_Header', var.request_uri, "-", matched)
+                if is_waf_enabled() == "on" then
+                    waf_output()
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
 --deny referer
 local function referer_check()
     if cfg("referer_check") == "on" then
@@ -848,6 +903,31 @@ local function post_attack_check()
             -- via parsed key/value pairs, so skip a second full-body scan
             -- unless OpenResty reported truncation.
             if is_form_urlencoded and POST_ARGS_ERR ~= "truncated" then
+                -- Fallback: '&' separators can split payloads such as
+                -- &#x3c;script&#x3e; into harmless-looking fragments, so re-scan
+                -- the raw body only when it carries entity / JS-escape markers
+                -- (rare in normal form traffic, keeps the fast path cheap)
+                local raw_form_body = req_get_body_data()
+                if raw_form_body ~= nil and #raw_form_body > 0 then
+                    if string_find(raw_form_body, "&#", 1, true)
+                        or string_find(raw_form_body, "\\u", 1, true)
+                        or string_find(raw_form_body, "\\x", 1, true) then
+                        local raw_matched = match_rule_entry(post_entry, raw_form_body, "joi")
+                        if not raw_matched then
+                            local raw_decoded, raw_changed = full_decode(raw_form_body)
+                            if raw_changed then
+                                raw_matched = match_rule_entry(post_entry, raw_decoded, "joi")
+                            end
+                        end
+                        if raw_matched then
+                            log_record('Deny_URL_POST', var.request_uri, "-", raw_matched)
+                            if waf_enabled then
+                                waf_output()
+                            end
+                            return true
+                        end
+                    end
+                end
                 return false
             end
         end
@@ -972,6 +1052,11 @@ local function waf_main()
     -- Request-type checks (url_skips can skip individual checks)
     if not (url_skips and url_skips.user_agent) then
         if user_agent_attack_check() then
+            return
+        end
+    end
+    if not (url_skips and url_skips.header) then
+        if header_attack_check() then
             return
         end
     end

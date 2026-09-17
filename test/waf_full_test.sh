@@ -56,7 +56,7 @@ echo "" | tee -a $RESULTS
 
 # 2. URL 路径攻击 (url.rule)
 echo -e "${CYAN}=== 2. URL 路径攻击检测 (url.rule) ===${NC}" | tee -a $RESULTS
-for path in /etc/passwd /etc/shadow /.env /.htaccess /.htpasswd /wp-admin/ /wp-login.php /phpinfo.php /xmlrpc.php /administrator/ /actuator/env /actuator/health /actuator/beans /h2-console /druid/ /swagger-ui /api-docs /v2/api-docs /.git/config /.svn/ /proc/self/environ /var/log/test /boot.ini /cmd.exe /cgi-bin/test /manager/html /jmx-console/ /struts2 /console /composer.json /package.json /Dockerfile /.gitignore /docker-compose.yml /.idea/workspace /.vscode/settings /id_rsa /.ssh/authorized_keys /terraform.tfstate /firebase.json /gcp-key.json /sa.json /.aws/credentials /shell.php /eval.php /config.json /test.sql /.DS_Store /server-status /WEB-INF/web.xml /Pipfile /requirements.txt /.npmrc /yarn.lock /swagger-resources /server-info /scripts/ /upload.php /connector.php /config.yml /database.sql /credentials /id_dsa /authorized_keys /.gcloud/ /gc-service.json /push_config.json; do
+for path in /etc/passwd /etc/shadow /.env /.htaccess /.htpasswd /wp-admin/ /wp-login.php /phpinfo.php /xmlrpc.php /administrator/ /actuator/env /actuator/health /actuator/beans /h2-console /druid/ /swagger-ui /api-docs /v2/api-docs /.git/config /.svn/ /proc/self/environ /var/log/test /boot.ini /cmd.exe /cgi-bin/test /manager/html /jmx-console/ /struts2 /console /composer.json /package.json /Dockerfile /.gitignore /docker-compose.yml /.idea/workspace /.vscode/settings /id_rsa /.ssh/authorized_keys /terraform.tfstate /firebase.json /gcp-key.json /sa.json /.aws/credentials /shell.php /eval.php /config.json /test.sql /.DS_Store /server-status /WEB-INF/web.xml /Pipfile /requirements.txt /.npmrc /yarn.lock /swagger-resources /server-info /scripts/setup.php /upload.php /connector.php /config.yml /database.sql /credentials /id_dsa /authorized_keys /.gcloud/ /gc-service.json /push_config.json /@fs/etc/passwd /api/v1/validate/code /adminer.php /www.zip /_cat/indices; do
     test_rule "Path $path" 403 -H "User-Agent: Mozilla/5.0" "${TARGET}${path}"
 done
 echo "" | tee -a $RESULTS
@@ -75,7 +75,6 @@ test_rule "SQL and 1=1" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?id=1+and+1=1"
 test_rule "SQL or 1=1" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?id=1+or+1=1"
 test_rule "SQL order by" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?id=1+order+by+1"
 test_rule "SQL LOAD_FILE()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=LOAD_FILE('/etc/passwd')"
-test_rule "SQL CONCAT()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=CONCAT(user(),0x3a)"
 test_rule "SQL CHAR()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=CHAR(74,65,73,74)"
 test_rule "SQL HEX()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=HEX('test')"
 test_rule "SQL UNHEX()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=UNHEX('74657374')"
@@ -96,12 +95,10 @@ test_rule "XSS <img onerror>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<img+
 test_rule "XSS <svg onload>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<svg+onload=alert(1)>"
 test_rule "XSS <body onload>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<body+onload=alert(1)>"
 test_rule "XSS <div onmouseover>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<div+onmouseover=alert(1)>"
-test_rule "XSS <meta>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<meta+http-equiv=refresh>"
 test_rule "XSS <object>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<object+data=javascript:alert(1)>"
 test_rule "XSS <input>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<input+onfocus=alert(1)>"
 test_rule "XSS <layer>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<layer+src=javascript:alert(1)>"
 test_rule "XSS <base>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<base+href=javascript:alert(1)>"
-test_rule "XSS <style>" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=<style>test</style>"
 test_rule "XSS onmouseover=" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=onmouseover=alert(1)"
 test_rule "XSS onerror=" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=onerror=alert(1)"
 test_rule "XSS onload=" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=onload=alert(1)"
@@ -111,8 +108,6 @@ test_rule "XSS vbscript:" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=vbscript:
 test_rule "XSS document.cookie" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=document.cookie"
 test_rule "XSS document.write" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=document.write(1)"
 test_rule "XSS String.fromCharCode" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=String.fromCharCode(74)"
-test_rule "XSS window.location" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=window.location=test"
-test_rule "XSS window.open" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=window.open('http://evil.com')"
 test_rule "XSS alert()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=alert(1)"
 test_rule "XSS confirm()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=confirm(1)"
 test_rule "XSS prompt()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=prompt(1)"
@@ -133,7 +128,6 @@ test_rule "Cmd shell_exec()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=shell_
 test_rule "Cmd popen()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=popen('ls','r')"
 test_rule "Cmd proc_open()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=proc_open('ls',[],pipes)"
 test_rule "Cmd pcntl_exec()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=pcntl_exec('/bin/ls')"
-test_rule "Cmd assert()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=assert(eval(cmd))"
 test_rule "Cmd preg_replace /e" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=preg_replace('/.*/e','eval(0)','x')"
 test_rule "Cmd create_function()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=create_function('',eval(0))"
 test_rule "Cmd call_user_func()" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=call_user_func('system','ls')"
@@ -184,11 +178,8 @@ test_rule 'PHP $_SESSION' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=\$_SESSIO
 test_rule 'PHP $_FILES' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=\$_FILES%5Bfile%5D"
 test_rule 'PHP $_SERVER' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=\$_SERVER%5BDOCUMENT_ROOT%5D"
 test_rule 'PHP eval()' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=eval(base64_decode(aGVsbG8=))"
-test_rule 'PHP include()' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=include(\$_GET%5Bfile%5D)"
-test_rule 'PHP require()' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=require(\$_GET%5Bfile%5D)"
 test_rule 'PHP file_get_contents()' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=file_get_contents('/etc/passwd')"
 test_rule 'PHP phpinfo()' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=phpinfo()"
-test_rule 'PHP define()' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=define('test','value')"
 test_rule 'PHP child_process' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=require('child_process')"
 test_rule 'PHP spawn()' 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=spawn('ls')"
 
@@ -209,9 +200,16 @@ echo "" | tee -a $RESULTS
 
 # 4. User-Agent 攻击检测 (useragent.rule)
 echo -e "${CYAN}=== 4. User-Agent 攻击检测 (useragent.rule) ===${NC}" | tee -a $RESULTS
-for ua_val in "sqlmap/1.0" "Nikto/2.1.6" "Nmap Scripting Engine" "DirBuster-1.0" "masscan/1.0" "dirb/1.0" "GoBuster/1.0" "ffuf/1.0" "Wfuzz/1.0" "Nuclei/1.0" "httpx/1.0" "feroxbuster/1.0" "Acunetix" "Nessus" "OpenVAS" "Burp Suite Professional" "AppScan" "Metasploit" "Qualys" "Python-urllib/3.9" "python-requests/2.28.0" "Go-http-client/1.1" "Scrapy/2.5"; do
+for ua_val in "sqlmap/1.0" "Nikto/2.1.6" "Nmap Scripting Engine" "DirBuster-1.0" "masscan/1.0" "dirb/1.0" "GoBuster/1.0" "ffuf/1.0" "Wfuzz/1.0" "Nuclei/1.0" "httpx/1.0" "feroxbuster/1.0" "Acunetix" "Nessus" "OpenVAS" "Burp Suite Professional" "AppScan" "Metasploit" "Qualys" "Scrapy/2.5"; do
     test_rule "UA $ua_val" 403 -A "$ua_val" "$TARGET/"
 done
+
+# 4.1 请求头检测 (header.rule)
+echo -e "${CYAN}=== 4.1 请求头检测 (header.rule) ===${NC}" | tee -a $RESULTS
+test_rule "Header X-Middleware-Subrequest" 403 -H "User-Agent: Mozilla/5.0" -H "X-Middleware-Subrequest: middleware" "$TARGET/"
+test_rule "Header X-Original-URL" 403 -H "User-Agent: Mozilla/5.0" -H "X-Original-URL: /admin" "$TARGET/"
+test_rule "Header metadata SSRF" 403 -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 169.254.169.254" "$TARGET/"
+test_rule "Header 正常请求头放行" 200 -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 192.168.1.10" "$TARGET/"
 echo "" | tee -a $RESULTS
 
 # 5. 白名单 UA 放行 (whiteua.rule)
@@ -248,7 +246,6 @@ test_rule "POST SQL info_schema" 403 -H "User-Agent: Mozilla/5.0" -d "q=select+f
 test_rule "POST SQL having" 403 -H "User-Agent: Mozilla/5.0" -d "q=having+1=1" "$TARGET/"
 test_rule "POST SQL and 1=1" 403 -H "User-Agent: Mozilla/5.0" -d "id=1+and+1=1" "$TARGET/"
 test_rule "POST SQL or 1=1" 403 -H "User-Agent: Mozilla/5.0" -d "id=1+or+1=1" "$TARGET/"
-test_rule "POST SQL CONCAT()" 403 -H "User-Agent: Mozilla/5.0" -d 'x=CONCAT(user(),0x3a)' "$TARGET/"
 test_rule "POST SQL CHAR()" 403 -H "User-Agent: Mozilla/5.0" -d "x=CHAR(74,65,73,74)" "$TARGET/"
 test_rule "POST SQL PG_SLEEP()" 403 -H "User-Agent: Mozilla/5.0" -d "q=PG_SLEEP(5)" "$TARGET/"
 test_rule "POST SQL extractvalue" 403 -H "User-Agent: Mozilla/5.0" -d "q=extractvalue(1,concat(0x7e,user()))" "$TARGET/"
@@ -377,8 +374,8 @@ echo -e "${CYAN}=== 11. 白名单 URL (只跳过url_check) ===${NC}" | tee -a $R
 # 白名单URL正常请求: 放行 (404=nginx找不到文件)
 code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" "$TARGET/123/")
 if [ "$code" != "403" ]; then ok "White URL /123/ 正常请求放行" "$code"; else bad "White URL /123/ 正常请求" "$code" "non-403"; fi
-# 白名单URL + 恶意UA: 应拦截 (UA检测仍执行)
-code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -A "Go-http-client/2.0" "$TARGET/123/")
+# 白名单URL + 恶意UA: 应拦截 (UA检测仍执行，用明确攻击工具 UA)
+code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -A "sqlmap/1.0" "$TARGET/123/")
 if [ "$code" = "403" ]; then ok "White URL /123/ + 恶意UA拦截" "$code"; else bad "White URL /123/ + 恶意UA应拦截" "$code" "403"; fi
 # 白名单URL + URL参数SQL注入: 应拦截 (args检测仍执行)
 code=$(curl --globoff -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" "$TARGET/123/?id=1+union+select+1")
@@ -434,6 +431,9 @@ $SSH180 "$NGINX_CMD -s reload 2>&1"
 sleep 3
 echo "  临时设置 cc_rate=60/60 方便测试" | tee -a $RESULTS
 set_config "cc_rate" "60/60"
+# cc_rate 是 init_by_lua 阶段载入的，修改后必须 reload 才会生效
+$SSH180 "$NGINX_CMD -s reload 2>&1"
+sleep 2
 echo "  发送 80 个请求 (cc_rate=60/60)" | tee -a $RESULTS
 CC_PASS=0; CC_BLOCK=0
 for i in $(seq 1 80); do

@@ -1,7 +1,9 @@
-(HTTrack|harvest|dirbuster|pangolin|nmap|sqln|hydra|libwww|BBBike|sqlmap|w3af|owasp|Nikto|fimap|havij|PycURL|zmeu|BabyKrokodil|netsparker|httperf|ApacheBench|Siege|wrk|hey|vegeta|k6|gatling|tsung|locust|boom)
+(HTTrack|harvest|dirbuster|pangolin|nmap|hydra|BBBike|sqlmap|w3af|owasp|Nikto|fimap|havij|PycURL|zmeu|BabyKrokodil|netsparker|httperf|ApacheBench|Siege|wrk/|hey/|vegeta|k6/|gatling|tsung|locust|boom/)
 (Acunetix|WebVulnScan|Paros|WebInspect|Burp|BurpSuite|WebScarab|dotDefender|AppScan|Arachni|Skipfish|Wapiti|WhatWeb|Wfuzz|DirBuster|GoBuster|ffuf|dirmap|feroxbuster|Naabu|Nuclei|httpx|subfinder|amass|masscan|ZGrab|ZMap|Shodan|Censys|Sn1per|wpscan|joomscan|droopescan|CMSeek|Osmedeus|theHarvester|sherlock|Th3inspector|InSpceptor)
 (Awvs|Nessus|OpenVAS|Greenbone|Nexpose|Metasploit|Rapid7|Qualys|Tenable|CobaltStrike|Empire|Mimikatz|BloodHound|Rubeus|WinPEAS|LinPEAS|PEASS|LaZagne|CrackMapExec|Impacket|Responder|Inveigh)
 (zgrab|nikto|dirb|gobuster|ffuf|dirmap|feroxbuster|wfuzz|skipfish|wapiti|whatweb|nuclei|naabu|subfinder|amass|shodan|censys|sqlninja|bsqlbf|dbmap|pwntools)
-(Python-urllib|Python-requests|Go-http-client|scrapy|NetEstate|BLEXBot|Sistrix|SiteAuditBot|SEOkicks|BacklinkCrawler|linkdexbot|Cliqzbot|findlinks|MetaJobBot|Amazonbot|Applebot-Extended|DataForSeoBot|serpstatbot|BomboraBot)
-(Fiddler|Charles|Postman|archiver|JBH|JaEYeol|MySQLMAN|DTSN|absinthe|OSSTMM|Brutus|Caveman|CursedGoogle|WinHTTrack|WebRipper|WebStripper|SiteSucker|SiteCopier|PageNest|BlackWidow|Teleport|Offline Explorer|Offline Navigator|GetWeb)
-(W3C_Validator|Jigsaw|netcraft|w3m|lynx|ELinks|libwww-perl|WinHTTP|MacOutlook|Indy|\bDBM\b|\bHCDM\b)
+(scrapy|NetEstate|BLEXBot|Sistrix|SiteAuditBot|SEOkicks|BacklinkCrawler|linkdexbot|Cliqzbot|findlinks|MetaJobBot|Amazonbot|Applebot-Extended|DataForSeoBot|serpstatbot|BomboraBot)
+(JBH|JaEYeol|MySQLMAN|DTSN|absinthe|OSSTMM|Brutus|Caveman|CursedGoogle|WinHTTrack|WebRipper|WebStripper|SiteSucker|SiteCopier|PageNest|BlackWidow|Teleport|Offline Explorer|Offline Navigator|GetWeb|ia_archiver)
+(W3C_Validator|Jigsaw|netcraft|w3m|lynx|ELinks|libwww-perl|\bIndy\b|\bDBM\b|\bHCDM\b)
+
+(xray/|afrog|fscan|TscanPlus|Yakit|W13Scan|vulmap|PocSuite|BBOT|katana/|ZAP/|\bGoby\b)

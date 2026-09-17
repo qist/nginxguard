@@ -58,7 +58,7 @@ for path in \
     /.aws/credentials /shell.php /eval.php /config.json /test.sql \
     /.DS_Store /server-status /WEB-INF/web.xml /Pipfile \
     /requirements.txt /.npmrc /yarn.lock /swagger-resources \
-    /server-info /scripts/ /rest/ /backup/test /upload.php \
+    /server-info /scripts/setup.php /rest/ /backup/test /upload.php \
     /connector.php /config.yml /database.sql /credentials \
     /id_dsa /authorized_keys /.gcloud/ /gc-service.json /push_config.json; do
     test_rule "Path $path" 403 -H "User-Agent: Mozilla/5.0" "${TARGET}${path}"

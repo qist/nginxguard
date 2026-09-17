@@ -5,7 +5,7 @@
 \.(php3|php4|phps|phtm|php\.suspected|p\.hp|phar\.php|pht\.php)
 \.(sh|bash|zsh|csh|ksh|fish|ash|dash)
 \.(tar|gz|zip|rar|7z|bz2|xz|tgz|tbz|tbz2|lz|lzma|Z|cab|arj|ace|lha|lzh|sit|sitx|sea|dmg|iso|vhd|vmdk|qcow2|img|ima|vfd|xpt|vhdx)
-\.(htaccess|htpasswd|htgroup|htdigest|passwd|shadow|group|sudoers|hosts|hostname|resolv\.conf|nsswitch\.conf|krb5\.conf|ldap\.conf)
+\.(htaccess|htpasswd|htgroup|htdigest|user\.ini|passwd|shadow|group|sudoers|hosts|hostname|resolv\.conf|nsswitch\.conf|krb5\.conf|ldap\.conf)
 \.(ssh|pem|key|pub|ppk|p12|pfx|keystore|jks|crt|cer|cert|csr|ca-bundle|crl|srl|der|pgp|gpg|asc|kbx|keychain)
 \.(env|environment|dotenv|ini|conf|cfg|config|properties|props|toml|plist)
 \.(sql|db|sqlite|sqlite3|mdb|accdb|dbf|db3|s3db|sl3|dump|bak|backup|old|orig|save|swp|swo|swn|tmp|temp)

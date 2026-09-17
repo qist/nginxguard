@@ -1,7 +1,7 @@
 # NginxGuard
 ## NginxGuard
 
-基于 Lua 的 NginxGuard（Web Application Firewall），支持 **基于域名的规则配置**、**IPv6 黑白名单**、**云凭据探测拦截** 等。
+基于 Lua 的 NginxGuard（Web Application Firewall），支持 **基于域名的规则配置**、**IPv6 黑白名单**、**云凭据探测拦截**、**请求头攻击检测** 等。
 
 ### 安装依赖
 
@@ -75,6 +75,7 @@ waf/
     ├── post.rule           # 全局 POST 规则
     ├── url.rule            # 全局 URL 规则
     ├── useragent.rule      # 全局 User-Agent 规则
+    ├── header.rule         # 全局请求头规则（绕过类头 / SSRF 元数据头）
     ├── whiteip.rule        # 全局白名单 IP（支持 IPv4/IPv6 CIDR/通配符/精确IP）
     ├── whiteurl.rule       # 全局白名单 URL（纯路径默认跳过URL检测，可选配置跳过指定检测项）
     ├── whiteua.rule        # 全局白名单 UA（搜索引擎爬虫）
@@ -160,6 +161,7 @@ waf/
 | `url_check` | URL 攻击检测 | `config_url_check` |
 | `url_args_check` | URL 参数检测 | `config_url_args_check` |
 | `user_agent_check` | User-Agent 检测 | `config_user_agent_check` |
+| `header_check` | 请求头检测（绕过类头、SSRF 元数据头） | `config_header_check` |
 | `bodyless` | 是否对 GET/HEAD/OPTIONS 等无 body 方法跳过 body/post/file_upload 检测。`"on"`（默认）=跳过；`"off"`=对所有方法扫描 body（更高延迟） | `config_bodyless` |
 | `cookie_check` | Cookie 检测 | `config_cookie_check` |
 | `cc_check` | CC 攻击检测 | `config_cc_check` |
@@ -202,6 +204,7 @@ waf/
 | `url.rule` | `url_attack_check()` | URL 路径攻击检测 |
 | `args.rule` | `url_args_attack_check()` | URL 参数攻击检测 |
 | `useragent.rule` | `user_agent_attack_check()` | User-Agent 攻击检测 |
+| `header.rule` | `header_attack_check()` | 请求头攻击检测（绕过类头、SSRF 元数据头） |
 | `cookie.rule` | `cookie_attack_check()` | Cookie 攻击检测 |
 | `post.rule` | `post_attack_check()` | POST 攻击检测（表单 + JSON body） |
 | `referer.rule` | `referer_check()` | Referer 检测 |
@@ -609,6 +612,7 @@ NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存�
 | 检测项 | 白名单 UA 是否跳过 |
 |--------|:----------------:|
 | User-Agent 黑名单 (`useragent.rule`) | ✅ 跳过 |
+| 请求头检测 (`header.rule`) | ❌ 仍检测 |
 | URL 攻击检测 (`url.rule`) | ❌ 仍检测 |
 | URL 参数检测 (`args.rule`) | ❌ 仍检测 |
 | POST 攻击检测 (`post.rule`) | ❌ 仍检测 |
@@ -636,6 +640,7 @@ NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存�
 |--------|:----------------:|
 | URL 路径检测 (`url.rule`) | ✅ 跳过 |
 | User-Agent 黑名单 (`useragent.rule`) | ❌ 仍检测 |
+| 请求头检测 (`header.rule`) | ❌ 仍检测 |
 | URL 参数检测 (`args.rule`) | ❌ 仍检测 |
 | POST 攻击检测 (`post.rule`) | ❌ 仍检测 |
 | CC 攻击检测 | ❌ 仍检测 |
@@ -659,6 +664,7 @@ NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存�
 | 检测项 | 说明 | 对应规则文件 |
 |--------|------|-------------|
 | `user_agent` | User-Agent 检测 | `useragent.rule` |
+| `header` | 请求头检测 | `header.rule` |
 | `referer` | Referer 检测 | `referer.rule` |
 | `url_attack` | URL 路径检测 | `url.rule` |
 | `url_args` | URL 参数检测 | `args.rule` |
@@ -716,6 +722,44 @@ NginxGuard 使用 `ngx.shared.dict` 和 **worker 级 Lua 变量** 多层缓存�
 
 ---
 
+## 请求头检测（header.rule）
+
+`header.rule` 用于检测**请求头**中的攻击/绕过特征，覆盖 URL/参数/body 规则触达不到的场景（例如 Next.js CVE-2025-29927 的 `X-Middleware-Subrequest` 中间件绕过）。
+
+### 匹配方式
+
+所有请求头会被拼成 `Name: value` 的多行文本，用**大小写不敏感 + 多行模式**匹配（`^` 可锚定任意头名开头）：
+
+```
+Host: api.example.com
+X-Original-URL: /admin        ← 命中 ^x-original-url:
+User-Agent: Mozilla/5.0
+```
+
+> 写规则时**务必用 `^` 锚定头名**（如 `(?i:^x-original-url:)`），否则会误伤头值中的普通文本。
+
+### 默认规则
+
+| 规则 | 拦截目标 |
+|------|---------|
+| `^x-middleware-subrequest:` | Next.js 中间件绕过（CVE-2025-29927） |
+| `^x-original-url:` / `^x-rewrite-url:` | 权限绕过（代理层改写 URL/路径） |
+| `^x-http-method-override:` | HTTP 方法覆盖 |
+| `^x-backend:` / `^x-original-host:` | 后端/主机覆盖 |
+| 代理头含 `169.254.169.254` 或 `metadata.google/azure.` | 云元数据 SSRF 探测 |
+
+### 配置
+
+```lua
+-- config.lua
+config_header_check = "on"
+```
+
+- 域名级覆盖：`"www.example.com": { "header_check": "off" }`
+- `whiteurl.rule` 扩展格式可用 `header` 跳过项对指定路径放行：`/callback/ header,url_attack`
+
+---
+
 ## 日志
 
 ### 同步写入机制
@@ -759,6 +803,7 @@ file:close()
 | `Deny_URL_Args` | URL 参数攻击拦截 |
 | `Deny_URL_POST` | POST 攻击拦截 |
 | `Deny_USER_AGENT` | User-Agent 攻击拦截 |
+| `Deny_Header` | 请求头攻击拦截（header.rule） |
 | `Deny_Cookie` | Cookie 攻击拦截 |
 | `Deny_Referer` | Referer 拦截 |
 | `Deny_File_Upload` | 文件上传拦截 |
@@ -899,19 +944,21 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
        ↓
 7. user_agent_check   → User-Agent 攻击（白名单 UA 跳过此项）
        ↓
-8. referer_check      → Referer 攻击
+8. header_check       → 请求头攻击（header.rule）
        ↓
-9. cc_attack_check    → CC 限速
+9. referer_check      → Referer 攻击
        ↓
-10. file_upload_check → 文件上传扩展名（`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
+10. cc_attack_check   → CC 限速
        ↓
-11. url_attack_check  → URL 路径攻击
+11. file_upload_check → 文件上传扩展名（`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
        ↓
-12. url_args_check    → URL 参数攻击
+12. url_attack_check  → URL 路径攻击
        ↓
-13. cookie_check      → Cookie 攻击
+13. url_args_check    → URL 参数攻击
        ↓
-14. post_check        → POST 攻击（表单 + JSON body，`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
+14. cookie_check      → Cookie 攻击
+       ↓
+15. post_check        → POST 攻击（表单 + JSON body，`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
        ↓
      放行
 ```

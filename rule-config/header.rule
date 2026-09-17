@@ -1,0 +1,19 @@
+# 请求头检测规则 (header.rule)
+# 检测对象: 所有请求头拼接成的 "Name: value" 多行文本
+# 匹配模式: 大小写不敏感 + 多行 (^ 可匹配任意头名开头)
+# 写规则建议: 用 ^ 锚定头名, 避免误伤头值里的普通文本
+# 修改后自动热加载 (10秒内生效, 无需重启nginx)
+
+# 1. 中间件/权限绕过类请求头 (Next.js CVE-2025-29927 等)
+(?i:^x-middleware-subrequest:)
+(?i:^x-original-url:)
+(?i:^x-rewrite-url:)
+(?i:^x-http-method-override:)
+(?i:^x-backend:)
+(?i:^x-original-host:)
+
+# 2. 代理头中出现云元数据地址 (SSRF 探测)
+(?i:^(?:x-forwarded-for|x-forwarded-host|forwarded|x-real-ip|x-client-ip):.*(?:169\.254\.169\.254|metadata\.(?:google|azure)\.))
+
+# 3. 请求头值中的 Log4Shell / JNDI 注入特征
+(?i:\$\{jndi:)
