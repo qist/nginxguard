@@ -1,9 +1,39 @@
-(HTTrack|harvest|dirbuster|pangolin|nmap|hydra|BBBike|sqlmap|w3af|owasp|Nikto|fimap|havij|PycURL|zmeu|BabyKrokodil|netsparker|httperf|ApacheBench|Siege|wrk/|hey/|vegeta|k6/|gatling|tsung|locust|boom/)
-(Acunetix|WebVulnScan|Paros|WebInspect|Burp|BurpSuite|WebScarab|dotDefender|AppScan|Arachni|Skipfish|Wapiti|WhatWeb|Wfuzz|DirBuster|GoBuster|ffuf|dirmap|feroxbuster|Naabu|Nuclei|httpx|subfinder|amass|masscan|ZGrab|ZMap|Shodan|Censys|Sn1per|wpscan|joomscan|droopescan|CMSeek|Osmedeus|theHarvester|sherlock|Th3inspector|InSpceptor)
+# ===== 攻击扫描器 / 渗透工具（命中直接 403）=====
+# 维护说明：
+#   1) 短词务必加边界限定，避免误伤正常业务 UA：
+#        Burp  → \bBurp\b|BurpSuite      不匹配 BurpMobile/BurpCloud/BurpHelper
+#        httpx → (?:^|[^-\w])httpx/      不匹配 python-httpx/、httpx-client
+#                |httpx-cli\b            加 \b 否则会命中 httpx-client
+#        amass → (?:^|[^-\w])amass       不匹配 amass-client
+#                (?:$|[^-\w])            注意 \b 不能排除 "-"，因为 '-' 是非单词字符
+#        owasp → OWASP ZAP|ZAP/          不匹配 OWASP-Dependency-Check
+#   2) 同一工具只保留一处规则，避免重复维护漏改（原重复的 nikto/dirbuster/zgrab/ffuf… 已合并去重）
+#   3) 正常搜索引擎/社交/归档爬虫（Amazonbot、Applebot-Extended、ia_archiver 等）不属于攻击
+#      UA，已移出本文件；如需限制这类爬虫请用独立的 bot 规则 + 限速策略，不要混进攻击规则
+#   4) 调试类 UA（Postman/Charles/Fiddler）不在此文件中，不做拦截
+
+# 通用扫描器 / 注入 / 压测工具
+(HTTrack|harvest|pangolin|nmap|hydra|BBBike|sqlmap|w3af|fimap|havij|PycURL|zmeu|BabyKrokodil|netsparker|httperf|ApacheBench|Siege|wrk/|hey/|vegeta|k6/|gatling|tsung|locust|boom/)
+
+# Web 漏洞扫描 / 目录爆破 / 资产测绘（原第 2、4 组合并去重）
+(Acunetix|WebVulnScan|Paros|WebInspect|\bBurp\b|BurpSuite|WebScarab|dotDefender|AppScan|Arachni|Skipfish|Wapiti|WhatWeb|Wfuzz|DirBuster|GoBuster|ffuf|dirmap|feroxbuster|Naabu|Nuclei|subfinder|masscan|ZGrab|ZMap|Shodan|Censys|Sn1per|wpscan|joomscan|droopescan|CMSeek|Osmedeus|theHarvester|sherlock|Th3inspector|InSpceptor|nikto|dirb|sqlninja|bsqlbf|dbmap|pwntools)
+
+# ProjectDiscovery httpx / OWASP Amass（边界限定，避免 httpx-client、python-httpx、amass-client 误杀）
+((?:^|[^-\w])httpx/|httpx-cli\b)
+(?:^|[^-\w])amass(?:$|[^-\w])
+(OWASP ZAP|ZAP/)
+
+# 漏洞利用 / 后渗透框架
 (Awvs|Nessus|OpenVAS|Greenbone|Nexpose|Metasploit|Rapid7|Qualys|Tenable|CobaltStrike|Empire|Mimikatz|BloodHound|Rubeus|WinPEAS|LinPEAS|PEASS|LaZagne|CrackMapExec|Impacket|Responder|Inveigh)
-(zgrab|nikto|dirb|gobuster|ffuf|dirmap|feroxbuster|wfuzz|skipfish|wapiti|whatweb|nuclei|naabu|subfinder|amass|shodan|censys|sqlninja|bsqlbf|dbmap|pwntools)
-(scrapy|NetEstate|BLEXBot|Sistrix|SiteAuditBot|SEOkicks|BacklinkCrawler|linkdexbot|Cliqzbot|findlinks|MetaJobBot|Amazonbot|Applebot-Extended|DataForSeoBot|serpstatbot|BomboraBot)
-(JBH|JaEYeol|MySQLMAN|DTSN|absinthe|OSSTMM|Brutus|Caveman|CursedGoogle|WinHTTrack|WebRipper|WebStripper|SiteSucker|SiteCopier|PageNest|BlackWidow|Teleport|Offline Explorer|Offline Navigator|GetWeb|ia_archiver)
+
+# SEO / 非官方爬虫滥用
+(scrapy|NetEstate|BLEXBot|Sistrix|SiteAuditBot|SEOkicks|BacklinkCrawler|linkdexbot|Cliqzbot|findlinks|MetaJobBot|DataForSeoBot|serpstatbot|BomboraBot)
+
+# 离线下载 / 站点镜像 / 弱口令爆破工具（正常爬虫 ia_archiver 已移出）
+(JBH|JaEYeol|MySQLMAN|DTSN|absinthe|OSSTMM|Brutus|Caveman|CursedGoogle|WinHTTrack|WebRipper|WebStripper|SiteSucker|SiteCopier|PageNest|BlackWidow|Teleport|Offline Explorer|Offline Navigator|GetWeb)
+
+# 校验器 / 终端浏览器（低危，保留观察）
 (W3C_Validator|Jigsaw|netcraft|w3m|lynx|ELinks|libwww-perl|\bIndy\b|\bDBM\b|\bHCDM\b)
 
-(xray/|afrog|fscan|TscanPlus|Yakit|W13Scan|vulmap|PocSuite|BBOT|katana/|ZAP/|\bGoby\b)
+# 国内 / 开源安全工具
+(xray/|afrog|fscan|TscanPlus|Yakit|W13Scan|vulmap|PocSuite|BBOT|katana/|\bGoby\b)
