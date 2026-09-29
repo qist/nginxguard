@@ -414,6 +414,11 @@ local worker_cc_rate_str = nil
 local CC_RATE_CACHE_TTL = 30
 local worker_cc_rate_last_sync = 0
 
+-- Whether this lua-nginx-module supports the init_ttl 4th argument of
+-- ngx.shared.DICT:incr() (added in lua-nginx-module v0.10.6).
+-- nil = not probed yet, true = supported, false = legacy module.
+local worker_incr_supports_init_ttl = nil
+
 local function cc_attack_check()
     if cfg("cc_check") == "on" then
         -- OPTIMIZATION: get_client_ip() is cached in ngx.ctx after first call
@@ -456,10 +461,52 @@ local function cc_attack_check()
         local CCseconds = worker_cc_seconds
         if CCcount == nil or CCseconds == nil then return false end
 
-        local count = limit:incr(CC_TOKEN, 1, 0, CCseconds)
-        if count == nil then
-            count = 1
-            limit:set(CC_TOKEN, 1, CCseconds)
+        -- incr(key, value, init, init_ttl) needs lua-nginx-module >= v0.10.6.
+        -- Probe once per worker, then stick to the working calling convention.
+        local count = nil
+        if worker_incr_supports_init_ttl == false then
+            -- Legacy module: incr(key, value, init), no init_ttl.
+            -- incr() keeps no TTL, so refresh the window after each hit to
+            -- avoid an unbounded counter that would eventually block everyone.
+            count = limit:incr(CC_TOKEN, 1, 0)
+            if count == nil then
+                count = 1
+                limit:set(CC_TOKEN, 1, CCseconds)
+            else
+                -- Prefer expire() (v0.10.6+); on even older builds without it,
+                -- re-set the value to rotate the window (count is preserved).
+                local ok_exp = pcall(limit.expire, limit, CC_TOKEN, CCseconds)
+                if not ok_exp then
+                    limit:set(CC_TOKEN, count, CCseconds)
+                end
+            end
+        else
+            if worker_incr_supports_init_ttl == nil then
+                -- First CC hit on this worker: probe for init_ttl support.
+                local ok_incr = pcall(function()
+                    count = limit:incr(CC_TOKEN, 1, 0, CCseconds)
+                end)
+                worker_incr_supports_init_ttl = ok_incr
+                if not ok_incr then
+                    -- Legacy module: fall back to 3-arg incr + rotate TTL.
+                    count = limit:incr(CC_TOKEN, 1, 0)
+                    if count == nil then
+                        count = 1
+                        limit:set(CC_TOKEN, 1, CCseconds)
+                    else
+                        local ok_exp = pcall(limit.expire, limit, CC_TOKEN, CCseconds)
+                        if not ok_exp then
+                            limit:set(CC_TOKEN, count, CCseconds)
+                        end
+                    end
+                end
+            else
+                count = limit:incr(CC_TOKEN, 1, 0, CCseconds)
+                if count == nil then
+                    count = 1
+                    limit:set(CC_TOKEN, 1, CCseconds)
+                end
+            end
         end
 
         if count > CCcount then
