@@ -37,3 +37,6 @@
 
 # 国内 / 开源安全工具
 (xray/|afrog|fscan|TscanPlus|Yakit|W13Scan|vulmap|PocSuite|BBOT|katana/|\bGoby\b)
+
+# ===== 2026-10-10 补充: 线上实抓的漏网扫描工具（LeakIX 系 / Go 渗透工具）=====
+(l9scan|l9explore|LeakIX|libredtail|Go Web Pentest Tool|CT-WP-Scanner|WP-Scanner)

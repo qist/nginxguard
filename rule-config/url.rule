@@ -346,3 +346,35 @@ java\.lang
 \/redfish\/v1
 \/HNAP1
 \/GponForm
+
+# ===== 2026-10-10 补充: 线上放行日志实测漏网 + 高频探测路径 =====
+# WordPress REST 枚举（/wp-json 实测放行, 含 rest_route= 参数形式）
+\/wp-json(\/|$|\?)
+rest_route=\/wp\/
+# Exchange / OWA（/owa /autodiscover /ecp 实测放行）
+\/owa\/
+\/autodiscover\/
+\/ecp\/
+\/mapi\/
+\/aspnet_client\/
+# Jenkins（/jenkins/script 等实测放行）
+\/jenkins\/
+# WebLogic console 子路径（原规则仅 ^\/console$）
+\/console\/(login|css)
+# TeamCity /app/rest/（实测放行）
+^\/app\/rest\/
+# SolarWinds Orion
+\/orion\/
+# Tomcat manager 子路径（原规则仅 /manager/html）
+\/manager\/(text|status|deploy|list|sessions)
+# ThinkPHP invokefunction RCE（实测放行）
+(?i:invokefunction)
+\\think\\
+# Struts *.action 探测
+\.action($|\?)
+# k8s API 敏感资源探测（业务 API 为 /api/v2.0/ 与 /api/v1/build_*，不受影响）
+^\/api\/v1\/(pods|secrets|namespaces|nodes|serviceaccounts)($|/|\?)
+# GraphQL 端点探测
+\/graphql($|\?)
+# Shell 历史文件补充
+\/\.zsh_history

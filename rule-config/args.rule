@@ -222,3 +222,10 @@ class\.module\.classLoader
 (?i:(?:alert|confirm|prompt|showmodaldialog)\s*\()
 \{\{\s*config\s*\}\}
 \{\{\s*namespace\s*\}\}
+
+# ===== 2026-10-10 补充 =====
+# ThinkPHP invokefunction RCE（?s=/index/\think\app/invokefunction 实测放行）
+(?i:invokefunction)
+\\think\\
+# Struts2 / WebLogic / Confluence OGNL 特征
+(?i:%\{#|#context\[)
