@@ -544,6 +544,7 @@ local function read_rule_file(filepath)
     -- build a hash set for O(1) substring check via string.find(input, rule, 1, true)
     -- This avoids linear iteration over fast_rules array for each request.
     local fast_rules = {}
+    local fast_rules_lower = {}
     local fast_hash = {}
     local regex_rules = {}
     local has_fast = false
@@ -555,6 +556,10 @@ local function read_rule_file(filepath)
                     table.insert(regex_rules, r)
                 else
                     table.insert(fast_rules, r)
+                    -- Lowercased copy for case-insensitive plain matching
+                    -- (string.find plain mode is case-sensitive; regex rules
+                    --  already get case-insensitivity via the "i" flag)
+                    table.insert(fast_rules_lower, string_lower(r))
                     fast_hash[r] = true
                     has_fast = true
                 end
@@ -583,7 +588,8 @@ local function read_rule_file(filepath)
 
     worker_rule_cache[filepath] = {
         mtime = current_mtime, rules = t, combined = combined,
-        fast_rules = fast_rules, fast_hash = has_fast and fast_hash or nil,
+        fast_rules = fast_rules, fast_rules_lower = fast_rules_lower,
+        fast_hash = has_fast and fast_hash or nil,
         regex_rules = regex_rules,
         glob_compiled = glob_compiled, last_check = now,
         empty = is_empty,
@@ -950,9 +956,14 @@ function match_rule_entry(entry, input, flags)
     end
 
     -- Engine 1: Fast plain-string matching (string.find, ~10x faster than regex)
+    -- Plain rules are matched case-insensitively: both input and rules are
+    -- lowercased before string.find (which is case-sensitive in plain mode).
+    -- Regex rules already get case-insensitivity via the "i" flag in ngx.re.find.
     if entry.fast_hash then
-        for _, rule in ipairs(entry.fast_rules) do
-            if string.find(input, rule, 1, true) then
+        local input_lower = string_lower(input)
+        local fast_lower = entry.fast_rules_lower
+        for i, rule in ipairs(entry.fast_rules) do
+            if string.find(input_lower, fast_lower[i], 1, true) then
                 set_worker_match_cache(cache_key, rule)
                 return rule
             end
