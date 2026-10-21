@@ -229,3 +229,7 @@ class\.module\.classLoader
 \\think\\
 # Struts2 / WebLogic / Confluence OGNL 特征
 (?i:%\{#|#context\[)
+
+# ===== 2026-10-22 补充: php2shell (CVE-2026-109618/109619) 利用特征 =====
+# 同 post.rule: 拦截携带 session.upload_progress 字段名的利用请求
+(?i:PHP_SESSION_UPLOAD_PROGRESS)

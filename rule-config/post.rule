@@ -214,3 +214,8 @@ https://172\.(16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31)\.
 class\.module\.classLoader
 \{\{\s*config\s*\}\}
 \{\{\s*namespace\s*\}\}
+
+# ===== 2026-10-22 补充: php2shell (CVE-2026-109618/109619) 利用特征 =====
+# session.upload_progress 是 CVE-2026-109618 UAF 的载体, 正常业务不会在请求中
+# 出现该字段名; 公开 PoC/利用工具(PHP2Shell 等)均携带此字段, 低误伤风险
+(?i:PHP_SESSION_UPLOAD_PROGRESS)
