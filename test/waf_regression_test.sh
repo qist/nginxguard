@@ -275,6 +275,69 @@ test_rule "Normal: Chrome UA" 200 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) 
 test_rule "Normal: Mobile UA" 200 -A "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)" "$TARGET/"
 
 # ============================================================
+# 10. cc_mode 计数粒度 (ip / ip_uri / ip_host)
+#     基线: / => 200, 未知路径 => 404, 任意 Host => 200
+# ============================================================
+echo -e "\n${CYAN}=== 10. cc_mode 计数粒度 ===${NC}" | tee -a $RESULTS
+set_config "cc_check" "on"
+set_config "cc_rate" "10/60"
+set_config "cc_block_ttl" "0"   # 关闭自动拉黑, 只观察计数行为
+reload_nginx
+
+# cc_burst <count> <path> [host] : 发 n 个请求, 输出最后一个状态码
+cc_burst() {
+    local n="$1" p="$2" h="$3" code=""
+    for i in $(seq 1 "$n"); do
+        if [ -n "$h" ]; then
+            code=$(curl --globoff -s -m 3 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "Host: $h" "$TARGET$p")
+        else
+            code=$(curl --globoff -s -m 3 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" "$TARGET$p")
+        fi
+    done
+    echo "$code"
+}
+
+# --- 10.1 cc_mode=ip (默认): 跨 URI 共享额度 ---
+echo -e "${YELLOW}  --- 10.1 cc_mode=ip: 跨 URI 共享 ---${NC}" | tee -a $RESULTS
+set_config "cc_mode" "ip"
+restart_nginx
+cc_burst 6 /ccm-a > /dev/null
+cc_burst 6 /ccm-b > /dev/null
+code=$(cc_burst 1 /ccm-a)
+if [ "$code" = "403" ]; then ok "ip模式: 两个URI合计12次超过10/60触发" "$code"; else bad "ip模式跨URI共享" "$code" "403"; fi
+
+# --- 10.2 cc_mode=ip_uri: URI 独立计数 ---
+echo -e "${YELLOW}  --- 10.2 cc_mode=ip_uri: URI 独立 ---${NC}" | tee -a $RESULTS
+set_config "cc_mode" "ip_uri"
+restart_nginx
+cc_burst 6 /ccm-a > /dev/null
+code=$(cc_burst 6 /ccm-b)
+if [ "$code" != "403" ]; then ok "ip_uri模式: 两个URI各6次不触发" "$code"; else bad "ip_uri模式URI独立" "$code" "非403"; fi
+code=$(cc_burst 12 /ccm-c)
+if [ "$code" = "403" ]; then ok "ip_uri模式: 单URI 12次超过10/60触发" "$code"; else bad "ip_uri模式单URI触发" "$code" "403"; fi
+
+# --- 10.3 cc_mode=ip_host: 域名独立计数 + 封禁隔离 ---
+echo -e "${YELLOW}  --- 10.3 cc_mode=ip_host: 域名独立 ---${NC}" | tee -a $RESULTS
+set_config "cc_mode" "ip_host"
+set_config "cc_block_ttl" "300"
+restart_nginx
+# 用非 index 路径: "/" 会内部跳转到 /index.html 触发两次 access 阶段
+cc_burst 6 /ccm-h h1.ccmode.test > /dev/null
+code=$(cc_burst 6 /ccm-h h2.ccmode.test)
+if [ "$code" != "403" ]; then ok "ip_host模式: 两个域名各6次不触发" "$code"; else bad "ip_host模式域名独立" "$code" "非403"; fi
+code=$(cc_burst 12 /ccm-h h1.ccmode.test)
+if [ "$code" = "403" ]; then ok "ip_host模式: 单域名12次超过10/60触发" "$code"; else bad "ip_host模式单域名触发" "$code" "403"; fi
+code=$(curl --globoff -s -m 3 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "Host: h2.ccmode.test" "$TARGET/ccm-h")
+if [ "$code" != "403" ]; then ok "ip_host模式: h1被封后h2不受影响(封禁隔离)" "$code"; else bad "ip_host模式封禁隔离" "$code" "非403"; fi
+
+# --- 恢复 cc_mode 相关配置 ---
+set_config "cc_mode" "ip"
+set_config "cc_rate" "150/60"
+set_config "cc_block_ttl" "600"
+restart_nginx
+log "cc_mode 用例完成, 配置已恢复"
+
+# ============================================================
 # 后处理: 恢复配置
 # ============================================================
 echo -e "\n${CYAN}=== 后处理: 恢复配置 ===${NC}" | tee -a $RESULTS

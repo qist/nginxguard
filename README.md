@@ -125,6 +125,11 @@ waf/
         "rule_dir": "domains/www.example.com"
     },
 
+    "app.example.com": {
+        "cc_mode": "ip_host",
+        "cc_rate": "300/60"
+    },
+
     "api.example.com": {
         "waf_enable": "off"
     },
@@ -166,7 +171,8 @@ waf/
 | `cookie_check` | Cookie 检测 | `config_cookie_check` |
 | `cc_check` | CC 攻击检测 | `config_cc_check` |
 | `cc_rate` | CC 限速（次数/秒数） | `config_cc_rate` |
-| `cc_block_ttl` | CC 触发后自动拉黑 IP 的时长（秒），0=不自动拉黑，默认 600（10分钟） | `config_cc_block_ttl` |
+| `cc_mode` | CC 计数粒度：`ip`（默认，整 IP 跨 URI/域名共享额度）/`ip_uri`（按 IP+URI，仅防单路径刷）/`ip_host`（按域名+IP，各域名独立额度与封禁范围，详见下方「CC 封禁隔离设计说明」） | `config_cc_mode` |
+| `cc_block_ttl` | CC 触发后自动拉黑 IP 的时长（秒），0=不自动拉黑，默认 600（10分钟）。域名级设为 `0` 时该域名同时**不检查任何 CC 封禁**（逃生门，见下方设计说明） | `config_cc_block_ttl` |
 | `post_check` | POST 检测（表单 + JSON body） | `config_post_check` |
 | `referer_check` | Referer 检测 | `config_referer_check` |
 | `file_upload_check` | 文件上传扩展名检测 | `config_file_upload_check` |
@@ -175,6 +181,23 @@ waf/
 | `post_body_scan_limit` | 大文本 body 落盘后的检查上限（字节）。超过该值直接拦截，避免部分扫描后误放行 | `config_post_body_scan_limit` |
 | `waf_output` | 拦截输出方式（`"html"` 或 `"redirect"`） | `config_waf_output` |
 | `waf_redirect_url` | 跳转 URL（`waf_output="redirect"` 时生效） | `config_waf_redirect_url` |
+
+### CC 封禁隔离设计说明（cc_mode）
+
+CC 计数 key 与自动拉黑 key 的粒度跟随 `cc_mode`：
+
+| 模式 | 计数 key | 拉黑 key |
+|------|---------|---------|
+| `ip`（默认） | `cc:<IP>` | `<IP>`（全局，全站生效） |
+| `ip_uri` | `cc:<IP>\|<URI>` | `<IP>`（全局） |
+| `ip_host` | `cc:h\|<域名>\|<IP>` | `h\|<域名>\|<IP>`（仅该域名） |
+
+**隔离是单向的，这是有意的设计决策**：
+
+- `ip_host` 域名自身触发 CC → 只拉黑 `域名+IP`，不影响其他域名 ✓
+- 其他域名（`ip` 模式）触发 CC → 写入全局 IP 封禁 → **`ip_host` 域名同样会被 403**（全局封禁对所有域名无条件生效）
+
+理由：全局封意味着该 IP 已在别的域名上触发过 CC（明确攻击特征），此时放行其访问 `ip_host` 域名没有收益，安全优先作为全局兜底；而误伤代价很小（`cc_block_ttl` 到期自动解封）。如果确有域名需要完全无视全局封禁，可给该域名单独配置 `"cc_block_ttl": 0`——语义为「此域名只限速 403，不进封禁体系」的逃生门。若未来需要「无视全局封、但保留自身域名级拉黑」的语义，应新增独立显式配置项（如 `ignore_global_ban`），而不是隐式绑定 `cc_mode`。
 
 ### multipart 与大 body 相关配置
 

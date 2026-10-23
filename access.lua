@@ -124,7 +124,7 @@ end
 local CONFIG_KEYS = {
     "waf_enable", "white_ip_check", "black_ip_check", "white_url_check",
     "white_ua_check", "user_agent_check", "header_check", "url_check", "url_args_check",
-    "cookie_check", "cc_check", "cc_rate", "cc_block_ttl",
+    "cookie_check", "cc_check", "cc_mode", "cc_rate", "cc_block_ttl",
     "post_check", "referer_check", "file_upload_check", "trust_proxy_headers",
     "multipart_streaming_check", "upload_filename_scan_limit", "post_body_scan_limit",
     "bodyless",
@@ -210,7 +210,13 @@ local function dynamic_black_ip_check()
     end
     -- OPTIMIZATION: get_client_ip() is cached in ngx.ctx after first call
     local CLIENT_IP = get_client_ip()
-    if badGuys:get(CLIENT_IP) then
+    -- check the global IP ban always; in "ip_host" mode also check the
+    -- per-domain ban (same key written by cc_attack_check)
+    local banned = badGuys:get(CLIENT_IP)
+    if not banned and cfg("cc_mode") == "ip_host" then
+        banned = badGuys:get("h|" .. (var.host or "-") .. "|" .. CLIENT_IP)
+    end
+    if banned then
         log_record('Dynamic_Block_IP',var.request_uri,"_","_")
         if is_waf_enabled() == "on" then
             ngx.exit(403)
@@ -421,9 +427,26 @@ local worker_incr_supports_init_ttl = nil
 
 local function cc_attack_check()
     if cfg("cc_check") == "on" then
+        -- count each client request only once: index redirects (e.g. "/" ->
+        -- "/index.html") re-run the access phase and would double-increment
+        if ngx.ctx._cc_counted then return false end
+        ngx.ctx._cc_counted = true
         -- OPTIMIZATION: get_client_ip() is cached in ngx.ctx after first call
         local CLIENT_IP = get_client_ip()
-        local CC_TOKEN = "cc:" .. CLIENT_IP
+        -- counting granularity: "ip" (default) | "ip_uri" | "ip_host"
+        -- cc_mode supports per-domain override via domain.json
+        local cc_mode = cfg("cc_mode")
+        local CC_TOKEN
+        if cc_mode == "ip_uri" then
+            -- per IP+URI: only blocks single-path flooding
+            CC_TOKEN = "cc:" .. CLIENT_IP .. "|" .. (var.uri or "-")
+        elseif cc_mode == "ip_host" then
+            -- per domain+IP: each domain gets an independent quota for the same IP
+            CC_TOKEN = "cc:h|" .. (var.host or "-") .. "|" .. CLIENT_IP
+        else
+            -- default: per client IP, shared across all URIs and domains
+            CC_TOKEN = "cc:" .. CLIENT_IP
+        end
         local limit = shared.limit
         if limit == nil then return false end
 
@@ -515,9 +538,18 @@ local function cc_attack_check()
             if block_ttl and block_ttl > 0 then
                 local badGuys = shared.badGuys
                 -- OPTIMIZATION: reuse already-cached CLIENT_IP from ngx.ctx
-                if badGuys and not badGuys:get(CLIENT_IP) then
-                    badGuys:set(CLIENT_IP, 1, block_ttl)
-                    log_record('CC_AutoBan', var.request_uri, "_", "ban_" .. block_ttl .. "s")
+                if badGuys then
+                    -- ban granularity follows cc_mode: "ip"/"ip_uri" ban the whole IP
+                    -- (global, all domains); "ip_host" bans domain+IP only, so a CC
+                    -- trigger on one domain does not block the IP on other domains
+                    local ban_key = CLIENT_IP
+                    if cc_mode == "ip_host" then
+                        ban_key = "h|" .. (var.host or "-") .. "|" .. CLIENT_IP
+                    end
+                    if not badGuys:get(ban_key) then
+                        badGuys:set(ban_key, 1, block_ttl)
+                        log_record('CC_AutoBan', var.request_uri, "_", "ban_" .. block_ttl .. "s")
+                    end
                 end
             end
             if is_waf_enabled() == "on" then
