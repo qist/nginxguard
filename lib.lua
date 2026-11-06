@@ -400,6 +400,7 @@ end
 
 --Load and parse domain.json into worker memory (called when mtime changes)
 --Precompiles wildcard patterns: *.example.com → suffix=".example.com"
+--Multi-domain keys "a.com, b.com" are expanded into separate entries sharing one cfg table
 local function load_domain_config(filepath, mtime)
     local f = io.open(filepath, "r")
     if f == nil then
@@ -421,6 +422,32 @@ local function load_domain_config(filepath, mtime)
 
     -- remove _comment
     domain_config["_comment"] = nil
+
+    -- Expand multi-domain keys (nginx server_name style): "a.com, b.com" →
+    -- separate per-domain entries pointing to the same config table.
+    -- JSON object keys cannot be arrays, so a comma-separated string is the syntax.
+    -- Collect first, then apply: adding keys during pairs() traversal is undefined in Lua.
+    local expanded = {}
+    for pattern, cfg in pairs(domain_config) do
+        if type(cfg) == "table" and string.find(pattern, ",", 1, true) then
+            for sub in string.gmatch(pattern, "[^,]+") do
+                local domain = string.gsub(sub, "^%s+", "")
+                domain = string.gsub(domain, "%s+$", "")
+                domain = string.lower(domain)
+                if domain ~= "" and domain ~= pattern then
+                    expanded[domain] = cfg
+                end
+            end
+            expanded[pattern] = false  -- mark composite key for removal
+        end
+    end
+    for sub, cfg in pairs(expanded) do
+        if cfg == false then
+            domain_config[sub] = nil
+        elseif domain_config[sub] == nil then
+            domain_config[sub] = cfg  -- explicit single-domain key wins over expansion
+        end
+    end
 
     -- precompile wildcard patterns: *.example.com → suffix=".example.com"
     local wildcards = {}
