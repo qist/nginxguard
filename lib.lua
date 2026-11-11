@@ -20,7 +20,7 @@ local string_match = string.match
 --秒级 mtime 在同一秒内的连续修改无法区分, 纳秒 + 大小组合保证热加载检测精度,
 --同时用于匹配缓存 key (filepath|签名) 的失效判断 —— 规则文件任何变化都会产生新签名
 local get_file_mtime
-local mtime_reliable = false
+local mtime_reliable = false  -- 诊断标志: FFI stat 是否可用 (false = fallback 文件大小签名模式)
 
 do
     local ok_ffi, ffi = pcall(require, "ffi")
@@ -99,9 +99,9 @@ if not get_file_mtime then
     end
 end
 
---Cache TTL: 0 when mtime is reliable (FFI stat available);
---60s when using file-size fallback (forces periodic re-read)
-local cache_ttl = mtime_reliable and 0 or 60
+--规则文件热加载节流统一使用 RULE_CACHE_TTL (10s)。
+--FFI 可用时签名含 mtime 纳秒 + 大小, 同秒修改可检出;
+--FFI 不可用时退化为文件大小签名 —— 同大小内容替换无法识别 (已知局限, 待处理项)
 
 --Validate IPv4 address: returns true if valid dotted-quad
 local function is_valid_ipv4(s)
@@ -633,6 +633,7 @@ local function read_rule_file(filepath)
         regex_rules = regex_rules,
         glob_compiled = glob_compiled, last_check = now,
         empty = is_empty,
+        filepath = filepath,
         cache_key = filepath .. "|" .. tostring(current_mtime),
     }
     return t
@@ -965,11 +966,16 @@ end
 
 --Get compiled IP rule cache for a rule file (TTL-based, recompiles on mtime change)
 --Returns compiled table or nil if file doesn't exist
+--IP 编译缓存按实际解析路径分槽 (entry.filepath): 启用域名级 rule_dir 时,
+--不同域名的同名 IP 规则文件 (blackip/whiteip/cdnip) 各自独立编译,
+--避免旧方案按 rulefilename 单槽导致「mtime 相同的域名间互串编译结果」——
+--whiteip 串位会造成白名单放行错误对象 (安全相关)
 get_compiled_ip_rules = function(rulefilename)
     local entry = get_rule_entry(rulefilename)
     if entry == nil then return nil end
 
-    local cache = worker_ip_cache[rulefilename]
+    local slot = entry.filepath or rulefilename
+    local cache = worker_ip_cache[slot]
     if cache and cache.mtime == entry.mtime then
         return cache
     end
@@ -977,7 +983,7 @@ get_compiled_ip_rules = function(rulefilename)
     -- recompile
     local compiled = compile_ip_rules(entry.rules)
     compiled.mtime = entry.mtime
-    worker_ip_cache[rulefilename] = compiled
+    worker_ip_cache[slot] = compiled
     return compiled
 end
 
