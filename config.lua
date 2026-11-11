@@ -5,7 +5,10 @@ config_waf_enable = "on"
 --trust proxy forwarded headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)
 --"on"  = trust forwarded headers to get real client IP (for CDN/reverse proxy deployment)
 --       + cdnip.rule exists  = only trust XFF from CDN IP list (secure, recommended)
---       + cdnip.rule absent  = trust XFF from any source (original behavior, less secure)
+--       + cdnip.rule absent  = trust XFF from any source (backward-compatible fallback)
+--         WARNING: without cdnip.rule the client IP is fully attacker-controlled —
+--         forged XFF bypasses blackip/whiteip and per-IP CC counting/bans.
+--         With trust_proxy_headers="on" you MUST configure cdnip.rule, or use "off".
 --"off" = only use remote_addr, never trust forwarded headers (direct internet exposure)
 config_trust_proxy_headers = "on"
 --CDN/trusted proxy IP list: place cdnip.rule in rule-config/ (same as blackip.rule etc.)
@@ -58,6 +61,11 @@ config_file_upload_check = "on"
 --"on"  (default) = skip body/post/file_upload checks for GET/HEAD/OPTIONS (lower latency)
 --"off"           = scan body/post for ALL methods including GET/HEAD/OPTIONS (higher latency, stricter)
 config_bodyless = "on"
+--enable/disable bounded segmented match cache (worker-level, hot 3072 + probation 1024)
+--"on"  (default) = cache small-input (<=512B) match results to speed up repeated detection;
+--                  cache only optimizes detection speed, it never changes detection results
+--"off"           = always run full rule detection (for A/B consistency testing)
+config_match_cache = "on"
 --enable/disable multipart temp-file body streaming scan (post.rule)
 --when off, keep filename extension checks enabled and only skip multipart temp-file body streaming scans
 config_multipart_streaming_check = "off"

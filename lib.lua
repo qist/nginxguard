@@ -688,23 +688,111 @@ end
 --Worker-level cache for compiled IP rules
 --key: filepath → { ipv4_ranges=, ipv6_list=, glob_list=, exact_list=, mtime= }
 local worker_ip_cache = {}
-local worker_match_cache = {}
-local worker_match_cache_count = 0
-local MATCH_CACHE_MAX = 4096
-local MATCH_CACHE_INPUT_MAX = 512
 
+--===========================================================================
+--Bounded segmented match cache (缓存只优化检测速度，绝不改变检测结果)
+--===========================================================================
+--Invariants:
+--  * Capacity pressure only evicts cache entries (FIFO, partial) — detection
+--    is never skipped or altered; a cache miss always runs full detection.
+--  * Cache key = rule file + mtime (rule version) + flags + full input, so a
+--    rule file change yields new keys and stale entries become unreachable
+--    garbage that the FIFO rings lazily reclaim.
+--  * Detection errors are NEVER cached as a no-match: negative results are
+--    cached only when the whole detection completed without regex errors.
+--Layout: probation 1024 (FIFO) + hot 3072 (FIFO, batch eviction).
+--New results enter probation; a SECOND hit promotes the entry into hot.
+--High-cardinality floods can only churn probation (one-shot entries are never
+--promoted), so hot entries survive — capacity pressure never wipes the cache.
+local MATCH_CACHE_MAX = 4096        --hot 3072 + probation 1024
+local MATCH_CACHE_INPUT_MAX = 512
+local MATCH_HOT_CAP = 3072
+local MATCH_PROBATION_CAP = 1024
+local MATCH_HOT_EVICT_BATCH = 384   --hot zone batch eviction size (amortized maintenance cost)
+--FIFO rings use monotonic seq + modulo indexing; ring size = 2x cap so the
+--live window (<= cap) never aliases an unpopped slot.
+local MATCH_HOT_RING = MATCH_HOT_CAP * 2
+local MATCH_PROBATION_RING = MATCH_PROBATION_CAP * 2
+
+--Hot zone: entries leave only when their own ring slot is popped, so every
+--queued slot is live and (seq - head) == live count.
+local match_hot_store = {}
+local match_hot_q = {}
+local match_hot_head, match_hot_seq = 0, 0
+
+--Probation zone: promotion removes the store entry while its ring slot may
+--still be unpopped, so slots are stamped with an owner seq and stale slots
+--are skipped lazily when the FIFO pointer reaches them.
+local match_probation_store = {}
+local match_probation_q = {}
+local match_probation_owner = {}
+local match_probation_head, match_probation_seq = 0, 0
+
+--Evict the oldest batch of hot entries (one ring walk per ~BATCH promotions)
+local function match_hot_evict_batch()
+    local head = match_hot_head
+    local target = head + MATCH_HOT_EVICT_BATCH
+    if target > match_hot_seq then target = match_hot_seq end
+    while head < target do
+        local slot = head % MATCH_HOT_RING
+        local k = match_hot_q[slot]
+        if k ~= nil then
+            match_hot_store[k] = nil
+        end
+        match_hot_q[slot] = nil
+        head = head + 1
+    end
+    match_hot_head = head
+end
+
+--Promote a probation entry into the hot zone (called on its second hit)
+local function match_hot_promote(key, value)
+    if match_hot_seq - match_hot_head >= MATCH_HOT_CAP then
+        match_hot_evict_batch()
+    end
+    local slot = match_hot_seq % MATCH_HOT_RING
+    match_hot_q[slot] = key
+    match_hot_store[key] = value
+    match_hot_seq = match_hot_seq + 1
+end
+
+--Insert a fresh detection result into the probation zone (FIFO, evict 1 when full)
+local function match_probation_insert(key, value)
+    if match_probation_seq - match_probation_head >= MATCH_PROBATION_CAP then
+        local slot = match_probation_head % MATCH_PROBATION_RING
+        local k = match_probation_q[slot]
+        match_probation_q[slot] = nil
+        match_probation_head = match_probation_head + 1
+        --owner stamp check: skip stale slots (entry promoted, slot not yet popped)
+        if k ~= nil and match_probation_owner[k] == match_probation_head - 1 then
+            match_probation_owner[k] = nil
+            match_probation_store[k] = nil
+        end
+    end
+    local seq = match_probation_seq
+    match_probation_q[seq % MATCH_PROBATION_RING] = key
+    match_probation_owner[key] = seq
+    match_probation_store[key] = value
+    match_probation_seq = seq + 1
+end
+
+--Cache a completed detection result (value: matched rule / "" edge case / false)
+--Only called for deterministic outcomes — error results never reach here
 local function set_worker_match_cache(key, value)
     if key == nil then
         return
     end
-    if worker_match_cache[key] == nil then
-        if worker_match_cache_count >= MATCH_CACHE_MAX then
-            worker_match_cache = {}
-            worker_match_cache_count = 0
-        end
-        worker_match_cache_count = worker_match_cache_count + 1
-    end
-    worker_match_cache[key] = value
+    match_probation_insert(key, value)
+end
+
+--Diagnostics: current cache occupancy (for tests & ops dashboards)
+function get_match_cache_stats()
+    return {
+        hot = match_hot_seq - match_hot_head,
+        hot_cap = MATCH_HOT_CAP,
+        probation = match_probation_seq - match_probation_head,
+        probation_cap = MATCH_PROBATION_CAP,
+    }
 end
 
 --Compile IP rule lines into pre-compiled CIDR ranges, glob regexes, exact IPs
@@ -974,9 +1062,20 @@ function match_rule_entry(entry, input, flags)
     if entry.empty then return nil end
 
     local cache_key = nil
-    if entry.cache_key and #input <= MATCH_CACHE_INPUT_MAX then
+    if config_match_cache ~= "off" and entry.cache_key and #input <= MATCH_CACHE_INPUT_MAX then
         cache_key = entry.cache_key .. "|" .. (flags or "") .. "|" .. input
-        local cached = worker_match_cache[cache_key]
+        --Hot zone first: a single table access covers most hits (no ordering
+        --maintenance per hit — keeps P99 latency flat)
+        local cached = match_hot_store[cache_key]
+        if cached == nil then
+            --Probation zone: a second hit promotes the entry into the hot zone
+            cached = match_probation_store[cache_key]
+            if cached ~= nil then
+                match_probation_store[cache_key] = nil
+                match_probation_owner[cache_key] = nil
+                match_hot_promote(cache_key, cached)
+            end
+        end
         if cached ~= nil then
             return cached or nil
         end
@@ -998,35 +1097,51 @@ function match_rule_entry(entry, input, flags)
     end
 
     -- Engine 2: Combined regex matching (ngx.re.find)
+    -- match_errored: a regex compile/exec failure occurred during this detection.
+    -- Error-influenced results are NEVER cached (a failed regex must not be
+    -- cached as no-match — that could let later requests bypass detection).
+    -- The result is still returned as-is; only caching is suppressed (fail-safe).
+    local match_errored = false
     if entry.combined ~= nil then
         local from, _, err = rulematch(input, entry.combined, flags)
         if err then
+            match_errored = true
             ngx.log(ngx.ERR, "[NginxGuard] combined regex compile/exec error: ", err,
                     " — falling back to per-rule matching")
         elseif from then
             -- Slow path (attack detected): find which specific regex rule matched for logging
             for _, rule in ipairs(entry.regex_rules) do
-                if rulematch(input, rule, flags) then
-                      set_worker_match_cache(cache_key, rule)
+                local f2, _, err2 = rulematch(input, rule, flags)
+                if err2 then
+                    match_errored = true
+                elseif f2 then
+                    set_worker_match_cache(cache_key, rule)
                     return rule
                 end
             end
-              set_worker_match_cache(cache_key, "")
+            if not match_errored then
+                set_worker_match_cache(cache_key, "")
+            end
             return ""  -- combined matched but individual didn't (edge case)
         else
-              set_worker_match_cache(cache_key, false)
+            set_worker_match_cache(cache_key, false)
             return nil  -- genuine no-match, fast path clean
         end
     end
 
     -- Fallback: per-rule matching (when combined is nil or errored)
     for _, rule in ipairs(entry.regex_rules) do
-        if rulematch(input, rule, flags) then
-              set_worker_match_cache(cache_key, rule)
+        local from, _, err = rulematch(input, rule, flags)
+        if err then
+            match_errored = true
+        elseif from then
+            set_worker_match_cache(cache_key, rule)
             return rule
         end
     end
-      set_worker_match_cache(cache_key, false)
+    if not match_errored then
+        set_worker_match_cache(cache_key, false)
+    end
     return nil
 end
 

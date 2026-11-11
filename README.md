@@ -394,6 +394,20 @@ config_trust_proxy_headers = "on"
 | `cdnip.rule` 文件不存在 | 信任所有 XFF | 原始行为，向后兼容 |
 | `cdnip.rule` 文件为空（或全注释） | 信任所有 XFF | 等同于文件不存在，回落原始行为 |
 
+> **⚠️ 安全警告（有意的兼容性设计，部署前必读）**
+>
+> 后两行（cdnip.rule 缺失/为空 → 信任所有 XFF）是**有意的向后兼容行为，不是缺陷**，
+> 但它意味着客户端 IP 完全由请求方控制。在 `trust_proxy_headers = "on"` 且未配置 `cdnip.rule`
+> 的生产环境中，攻击者可通过伪造 `X-Forwarded-For` 头实现：
+>
+> - **绕过 IP 黑名单**（`blackip.rule`）：伪造的 IP 永远不在黑名单中
+> - **滥用 IP 白名单**（`whiteip.rule`）：伪造命中白名单 IP 可跳过全部 WAF 检测（最高风险）
+> - **绕过 CC 防护与封禁**：每次请求伪造不同 XFF，使按 IP 计数的 CC 检测和自动封禁完全失效
+>
+> 因此：`trust_proxy_headers = "on"` 时**必须**配置 `cdnip.rule`（哪怕只有一行 CDN IP 段）；
+> 无法维护 CDN IP 列表时请使用 `"off"`。该行为仅保留给依赖"信任所有 XFF"的存量部署，
+> 用于平滑迁移，不应作为生产默认形态。
+
 支持域名级覆盖：
 
 ```json
@@ -907,7 +921,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 | **最小输入长度检查** | `match_any_rule` 中 `#input < 2` 直接返回 nil，避免对短参数做正则匹配 |
 | **filepath 字符串缓存** | `get_rule_entry` 缓存 `config_rule_dir .. '/' .. rulefilename` 到 worker 级变量，避免每请求字符串拼接 |
 | **POST Content-Type 分流** | `application/x-www-form-urlencoded` 才走 `get_post_args()`；JSON/XML/plain body 直接走原始 body 扫描 |
-| **规则匹配缓存** | 小体积请求体/参数按 `规则文件 + mtime + flags + input` 做 worker 级缓存，重复请求直接复用匹配结果 |
+| **规则匹配缓存** | 有界分段匹配缓存（热点区 3072 + 暂存区 1024，FIFO + 批量淘汰），key 为 `规则文件 + mtime + flags + input`；缓存只优化检测速度、绝不改变检测结果：容量满时仅部分淘汰不清空、暂存区条目二次命中晋升热点区（高基数洪水无法冲刷热点）、正则执行异常的负结果不缓存（回退完整检测）、可通过 `config_match_cache = "off"` 关闭做 A/B 一致性验证（`test/test_match_cache.lua`） |
 
 ### 测试结果
 
@@ -962,7 +976,7 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 > 9. **内网 IP 快速短路**：127.x/10.x/172.x/192.x 跳过完整 CIDR 匹配，O(1) 判定
 > 10. **代理头直读**：直接读取 `ngx.var.http_cf_connecting_ip` / `http_x_real_ip` / `http_x_forwarded_for`，减少 headers table 分配
 > 11. **POST Content-Type 分流**：表单请求才走 `get_post_args()`，JSON/XML/plain body 直接按原始 body 扫描
-> 12. **规则匹配缓存**：重复的小体积参数/body 按 `mtime + flags + input` 复用匹配结果，显著降低 POST 热路径正则成本
+> 12. **规则匹配缓存**：重复的小体积参数/body 按 `mtime + flags + input` 复用匹配结果，显著降低 POST 热路径正则成本。缓存为**有界分段缓存**（热点区 3072 + 暂存区 1024）：新结果进暂存区、二次命中晋升热点区，热点区满时批量 FIFO 淘汰，容量压力只做部分淘汰、绝不清空也绝不跳过检测；正则执行异常的负结果不缓存；规则文件更新后旧缓存 key 随 mtime 自动失效
 >
 > 本轮新增的 **Nginx 内存优化**：将 `lua_shared_dict limit`/`badGuys` 从 100m 缩减到 10m，`client_header_buffer_size` 从 1024k 缩到 1k，`large_client_header_buffers` 从 4×128k 缩到 4×8k，`client_body_buffer_size` 从 1024k 缩到 128k，`proxy_buffer_size`/`proxy_buffers` 从 64k 缩到 16k，`proxy_cache_path` 从 50m/7d/2g 缩到 10m/1d/1g，`open_file_cache` 从 100000 条缩到 10000 条。实测 WAF 关闭时内存 174MB，WAF 全开后 179-183MB，内存仅增加 5-9MB，且所有场景 P99 延迟均控制在 66ms 以内。`trust_proxy_headers=on` + `cdnip.rule` 相比 `off` 仍有额外开销，但明显优于“无 `cdnip.rule` 时无条件信任 XFF”的路径；生产环境依然建议保留 CDN IP 校验。CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。新增的 worker 级匹配缓存主要把收益打在重复参数和重复 body 的 POST 热路径上。
 
