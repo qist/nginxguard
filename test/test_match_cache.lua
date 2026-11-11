@@ -327,7 +327,25 @@ check("负结果正确晋升至热点区 (hot 增量 = 1)", s8b.hot - s8a.hot ==
       "hot delta=" .. (s8b.hot - s8a.hot))
 
 -- ---------------------------------------------------------------------------
-section("T9 收尾: 缓存开启状态下全用例最终复核")
+section("T9 规则同秒双改: mtime 纳秒签名必须检出 (秒级 mtime 会漏检)")
+config_match_cache = "on"
+local SSD = RULE_DIR .. "/samesec.rule"
+local f1 = io.open(SSD, "w"); f1:write("aaa_oldsignature\n"); f1:close()
+local r_s1 = match("samesec.rule", "trigger aaa_oldsignature here", "i")
+match("samesec.rule", "trigger aaa_oldsignature here", "i")   -- 二次命中 → 晋升热点
+check("同秒双改前检出 oldsignature", r_s1 == "MATCH:aaa_oldsignature", r_s1)
+-- 同一秒内重写 (内容与大小均变化): FFI 路径靠 mtime_nsec, fallback 路径靠 size
+-- RULE_CACHE_TTL(10s) 内不 re-stat; TTL 过期后的 stat 必须检出 —— 秒级 mtime 方案下
+-- 这次 stat 仍看到相同秒 → 永远漏检, 纳秒签名方案下必然检出 (本用例的核心回归点)
+local f2 = io.open(SSD, "w"); f2:write("bbb_newsignature_here\n"); f2:close()
+ngx.sleep(11)
+local r_s2 = match("samesec.rule", "trigger aaa_oldsignature here", "i")
+check("同秒双改后旧签名不再检出 (旧缓存随版本签名失效)", r_s2 == "nil", r_s2)
+local r_s3 = match("samesec.rule", "trigger bbb_newsignature_here here", "i")
+check("同秒双改后新签名被检出", r_s3 == "MATCH:bbb_newsignature_here", r_s3)
+
+-- ---------------------------------------------------------------------------
+section("T10 收尾: 缓存开启状态下全用例最终复核")
 config_match_cache = "on"
 local final_mismatch = 0
 for i, input in ipairs(AB_INPUTS) do

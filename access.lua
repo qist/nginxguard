@@ -1024,7 +1024,15 @@ local function post_attack_check()
                     if post_body_scan_limit <= 0 then
                         post_body_scan_limit = MAX_INSPECTABLE_BODY_FILE_SIZE
                     end
-                    if (not is_multipart_form) and file_size and file_size > post_body_scan_limit then
+                      -- multipart streaming 关闭时跳过 multipart body 扫描 (保持原行为)
+                      if is_multipart_form and not is_multipart_streaming_enabled() then
+                          f:close()
+                          return false
+                      end
+                    -- 统一超限拒绝: 非 multipart 与 multipart 流式扫描均适用。
+                    -- multipart 大文件若只扫描前 post_body_scan_limit 字节, 超出部分
+                    -- 不检测即放行, 属于部分扫描 fail-open —— 必须拦截。
+                    if file_size and file_size > post_body_scan_limit then
                         log_record('Deny_URL_POST_Oversize', var.request_uri,
                             "size:" .. tostring(file_size),
                             "max:" .. tostring(post_body_scan_limit))
@@ -1034,11 +1042,8 @@ local function post_attack_check()
                         end
                         return true
                     end
-                      if is_multipart_form and not is_multipart_streaming_enabled() then
-                          f:close()
-                          return false
-                      end
                     local chunk_size = 65536
+                    -- 超限请求已被拒绝, 到达此处 file_size <= post_body_scan_limit, 全文件扫描
                     local max_scan = is_multipart_form and post_body_scan_limit or file_size
                     local overlap = 2048
                     local total = 0

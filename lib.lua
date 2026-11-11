@@ -15,19 +15,28 @@ local string_match = string.match
 --File modification time detection
 --Uses LuaJIT FFI (built into OpenResty) to call libc stat() — no extra module needed
 --Fallback: file size + TTL if FFI unavailable
+--
+--返回值是规则版本签名字符串 "sec:nsec:size"（mtime 秒 + 纳秒 + 文件大小）:
+--秒级 mtime 在同一秒内的连续修改无法区分, 纳秒 + 大小组合保证热加载检测精度,
+--同时用于匹配缓存 key (filepath|签名) 的失效判断 —— 规则文件任何变化都会产生新签名
 local get_file_mtime
 local mtime_reliable = false
 
 do
     local ok_ffi, ffi = pcall(require, "ffi")
     if ok_ffi then
-        -- Define a minimal struct to read st_mtime on Linux 64-bit (x86_64 & aarch64)
-        -- st_mtime is at byte offset 88 in struct stat; total struct is 144 bytes
+        -- struct stat (x86_64 & aarch64, glibc):
+        --   st_size       @ 48
+        --   st_mtime      @ 88 (st_mtim.tv_sec)
+        --   st_mtime_nsec @ 96 (st_mtim.tv_nsec)
         pcall(ffi.cdef, [[
             struct waf_stat_t {
-                long long _pad_to_mtime[11];
+                long long _pad1[6];
+                long long st_size;
+                long long _pad2[4];
                 long long st_mtime;
-                long long _rest[7];
+                long long st_mtime_nsec;
+                long long _pad3[6];
             };
             int stat(const char *path, struct waf_stat_t *buf);
             int __xstat(int ver, const char *path, struct waf_stat_t *buf);
@@ -42,7 +51,9 @@ do
                 do_stat = function(path)
                     local b = ffi.new("struct waf_stat_t")
                     if ffi.C.stat(path, b) == 0 then
-                        return tonumber(b.st_mtime)
+                        return tostring(tonumber(b.st_mtime)) .. ":" ..
+                               tostring(tonumber(b.st_mtime_nsec)) .. ":" ..
+                               tostring(tonumber(b.st_size))
                     end
                     return nil
                 end
@@ -57,7 +68,9 @@ do
                         do_stat = function(path)
                             local b = ffi.new("struct waf_stat_t")
                             if ffi.C.__xstat(ver, path, b) == 0 then
-                                return tonumber(b.st_mtime)
+                                return tostring(tonumber(b.st_mtime)) .. ":" ..
+                                       tostring(tonumber(b.st_mtime_nsec)) .. ":" ..
+                                       tostring(tonumber(b.st_size))
                             end
                             return nil
                         end
@@ -82,7 +95,7 @@ if not get_file_mtime then
         if f == nil then return nil end
         local size = f:seek("end")
         f:close()
-        return size
+        return tostring(size)
     end
 end
 

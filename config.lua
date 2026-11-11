@@ -74,6 +74,8 @@ config_multipart_streaming_check = "off"
 config_upload_filename_scan_limit = 0
 --inspection limit in bytes for large temp-file bodies (JSON/XML/plain text, etc.)
 --requests larger than this limit are denied to avoid partial scans that fail open
+--applies to BOTH non-multipart bodies and multipart streaming scans
+--(multipart bodies exceeding this limit are denied, never partially scanned)
 config_post_body_scan_limit = 2097152
 --config waf output redirect/html
 config_waf_output = "html"
