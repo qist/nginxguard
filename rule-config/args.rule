@@ -232,4 +232,5 @@ class\.module\.classLoader
 
 # ===== 2026-10-22 补充: php2shell (CVE-2026-109618/109619) 利用特征 =====
 # 同 post.rule: 拦截携带 session.upload_progress 字段名的利用请求
+# 2026-11-20 复核: 同一特征覆盖 CVE-2026-126714/115560 的 query 形态入口
 (?i:PHP_SESSION_UPLOAD_PROGRESS)

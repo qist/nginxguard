@@ -218,4 +218,10 @@ class\.module\.classLoader
 # ===== 2026-10-22 补充: php2shell (CVE-2026-109618/109619) 利用特征 =====
 # session.upload_progress 是 CVE-2026-109618 UAF 的载体, 正常业务不会在请求中
 # 出现该字段名; 公开 PoC/利用工具(PHP2Shell 等)均携带此字段, 低误伤风险
+# ===== 2026-11-20 复核: 同一特征覆盖 phpAfterShell 事件入口 =====
+# CVE-2026-126714 (phpAfterShell 会话文件部分覆写) 与 CVE-2026-115560
+# (session serialize_handler 不一致) 的远程塑形入口同为 upload_progress
+# 字段; 该特征仅为虚拟补丁, 根治需升级 PHP 并设
+# session.upload_progress.enabled=Off (multipart 形态拦截依赖
+# config_multipart_streaming_check=on, query 形态由 args.rule 覆盖)
 (?i:PHP_SESSION_UPLOAD_PROGRESS)
