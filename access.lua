@@ -1,6 +1,7 @@
 --NginxGuard Action
 require 'config'
 require 'lib'
+local engine = require 'engine'
 
 --args
 local rulematch = ngx.re.find
@@ -185,15 +186,12 @@ local function white_ip_check()
 end
 
 --deny black ip (static blacklist from blackip.rule)
+--L1 detector: 只返回事实, 由 L3 决定日志/动作
 local function black_ip_check()
      if cfg("black_ip_check") == "on" then
         -- OPTIMIZATION: get_client_ip() is cached in ngx.ctx after first call
         if match_ip_rule('blackip.rule', get_client_ip()) then
-            log_record('BlackList_IP',var.request_uri,"_","_")
-            if is_waf_enabled() == "on" then
-                ngx.exit(403)
-                return true
-            end
+            return { rule = "blackip" }
         end
      end
 end
@@ -217,11 +215,7 @@ local function dynamic_black_ip_check()
         banned = badGuys:get("h|" .. (var.host or "-") .. "|" .. CLIENT_IP)
     end
     if banned then
-        log_record('Dynamic_Block_IP',var.request_uri,"_","_")
-        if is_waf_enabled() == "on" then
-            ngx.exit(403)
-            return true
-        end
+        return { rule = "dynamic_ban" }
     end
     return false
 end
@@ -533,7 +527,6 @@ local function cc_attack_check()
         end
 
         if count > CCcount then
-            log_record('CC_Attack', var.request_uri, "-", "-")
             local block_ttl = tonumber(cfg("cc_block_ttl"))
             if block_ttl and block_ttl > 0 then
                 local badGuys = shared.badGuys
@@ -552,10 +545,7 @@ local function cc_attack_check()
                     end
                 end
             end
-            if is_waf_enabled() == "on" then
-                ngx.exit(403)
-            end
-            return true
+            return { rule = "cc_rate" }
         end
     end
     return false
@@ -578,11 +568,7 @@ local function cookie_attack_check()
                 end
             end
             if matched then
-                log_record('Deny_Cookie',var.request_uri,"-",matched)
-                if is_waf_enabled() == "on" then
-                    waf_output()
-                    return true
-                end
+                return { rule = matched }
             end
         end
     end
@@ -605,11 +591,7 @@ local function url_attack_check()
             end
         end
         if matched then
-            log_record('Deny_URL',REQ_URI,"-",matched)
-            if is_waf_enabled() == "on" then
-                waf_output()
-                return true
-            end
+            return { rule = matched }
         end
     end
     return false
@@ -643,11 +625,7 @@ local function url_args_attack_check()
                     end
                 end
                 if matched then
-                    log_record('Deny_URL_Args',var.request_uri,"key:"..key,matched)
-                    if is_waf_enabled() == "on" then
-                        waf_output()
-                        return true
-                    end
+                    return { rule = matched, detail = "key:" .. key }
                 end
             end
             -- check parameter value
@@ -666,11 +644,7 @@ local function url_args_attack_check()
                     end
                 end
                 if matched then
-                    log_record('Deny_URL_Args',var.request_uri,"-",matched)
-                    if is_waf_enabled() == "on" then
-                        waf_output()
-                        return true
-                    end
+                    return { rule = matched }
                 end
             end
         end
@@ -696,11 +670,7 @@ local function url_args_attack_check()
                     end
                 end
                 if matched then
-                    log_record('Deny_URL_Args', var.request_uri, "truncated_query", matched)
-                    if is_waf_enabled() == "on" then
-                        waf_output()
-                        return true
-                    end
+                    return { rule = matched, detail = "truncated_query" }
                 end
             end
         end
@@ -722,11 +692,7 @@ local function user_agent_attack_check()
         if USER_AGENT ~= nil then
             local matched = match_rule_entry(ua_entry, USER_AGENT, "ijo")
             if matched then
-                log_record('Deny_USER_AGENT',var.request_uri,"-",matched)
-                if is_waf_enabled() == "on" then
-                    waf_output()
-                    return true
-                end
+                return { rule = matched }
             end
         end
     end
@@ -777,11 +743,7 @@ local function header_attack_check()
         if HEADER_TEXT ~= nil then
             local matched = match_rule_entry(header_entry, HEADER_TEXT, "joim")
             if matched then
-                log_record('Deny_Header', var.request_uri, "-", matched)
-                if is_waf_enabled() == "on" then
-                    waf_output()
-                    return true
-                end
+                return { rule = matched }
             end
         end
     end
@@ -799,11 +761,7 @@ local function referer_check()
         if REFERER ~= nil then
             local matched = match_rule_entry(referer_entry, REFERER, "joi")
             if matched then
-                log_record('Deny_Referer', var.request_uri, "-", matched)
-                if is_waf_enabled() == "on" then
-                    waf_output()
-                    return true
-                end
+                return { rule = matched }
             end
         end
     end
@@ -894,11 +852,7 @@ local function file_upload_check()
         for _, fname in ipairs(filenames) do
             local matched = match_rule_entry(fileext_entry, fname, "joi")
             if matched then
-                log_record('Deny_File_Upload', var.request_uri, "-", matched)
-                if is_waf_enabled() == "on" then
-                    waf_output()
-                    return true
-                end
+                return { rule = matched }
             end
         end
     end
@@ -947,11 +901,7 @@ local function post_attack_check()
                         end
                     end
                     if matched_key then
-                        log_record('Deny_URL_POST', var.request_uri, "key:"..key, matched_key)
-                        if waf_enabled then
-                            waf_output()
-                            return true
-                        end
+                        return { rule = matched_key, detail = "key:" .. key }
                     end
                 end
                 -- check parameter value
@@ -970,11 +920,7 @@ local function post_attack_check()
                         end
                     end
                     if matched then
-                        log_record('Deny_URL_POST', var.request_uri, "-", matched)
-                        if waf_enabled then
-                            waf_output()
-                            return true
-                        end
+                        return { rule = matched }
                     end
                 end
             end
@@ -999,11 +945,7 @@ local function post_attack_check()
                             end
                         end
                         if raw_matched then
-                            log_record('Deny_URL_POST', var.request_uri, "-", raw_matched)
-                            if waf_enabled then
-                                waf_output()
-                            end
-                            return true
+                            return { rule = raw_matched }
                         end
                     end
                 end
@@ -1033,14 +975,12 @@ local function post_attack_check()
                     -- multipart 大文件若只扫描前 post_body_scan_limit 字节, 超出部分
                     -- 不检测即放行, 属于部分扫描 fail-open —— 必须拦截。
                     if file_size and file_size > post_body_scan_limit then
-                        log_record('Deny_URL_POST_Oversize', var.request_uri,
-                            "size:" .. tostring(file_size),
-                            "max:" .. tostring(post_body_scan_limit))
                         f:close()
-                        if waf_enabled then
-                            waf_output()
-                        end
-                        return true
+                        return {
+                            rule = "max:" .. tostring(post_body_scan_limit),
+                            detail = "size:" .. tostring(file_size),
+                            tag = 'Deny_URL_POST_Oversize',
+                        }
                     end
                     local chunk_size = 65536
                     -- 超限请求已被拒绝, 到达此处 file_size <= post_body_scan_limit, 全文件扫描
@@ -1063,12 +1003,8 @@ local function post_attack_check()
                             end
                         end
                         if matched then
-                            log_record('Deny_URL_POST', var.request_uri, "-", matched)
                             f:close()
-                            if waf_enabled then
-                                waf_output()
-                            end
-                            return true
+                            return { rule = matched }
                         end
                         if #data > overlap then
                             prev_tail = string_sub(data, -overlap)
@@ -1090,11 +1026,7 @@ local function post_attack_check()
                 end
             end
             if matched then
-                log_record('Deny_URL_POST', var.request_uri, "-", matched)
-                if waf_enabled then
-                    waf_output()
-                    return true
-                end
+                return { rule = matched }
             end
         end
     end
@@ -1102,10 +1034,64 @@ local function post_attack_check()
 end
 
 --=========================================================================
+-- L1 检测器注册
+-- 名字即 combo.jsonl 表达式里引用的标识; 检测器只返回事实
+-- ({ rule=命中的规则, detail=日志细节, tag=日志标签覆盖 }), 不做日志/拦截。
+-- 结果按请求缓存在 engine 内, 任何检测器每次请求最多执行一次。
+--=========================================================================
+engine.register('url', url_attack_check)
+engine.register('url_args', url_args_attack_check)
+engine.register('post', post_attack_check)
+engine.register('header', header_attack_check)
+engine.register('cookie', cookie_attack_check)
+engine.register('user_agent', user_agent_attack_check)
+engine.register('referer', referer_check)
+engine.register('file_upload', file_upload_check)
+engine.register('cc', cc_attack_check)
+engine.register('black_ip', black_ip_check)
+engine.register('dynamic_black_ip', dynamic_black_ip_check)
+
+--=========================================================================
+-- 传统顺序策略: 检测器 → 日志标签 + 动作
+-- combo.jsonl 为空时行为与改造前完全一致 (顺序、日志标签、403/HTML 均保持)
+--=========================================================================
+local LEGACY_TAGS = {
+    dynamic_black_ip = 'Dynamic_Block_IP',
+    black_ip = 'BlackList_IP',
+    user_agent = 'Deny_USER_AGENT',
+    header = 'Deny_Header',
+    referer = 'Deny_Referer',
+    cc = 'CC_Attack',
+    file_upload = 'Deny_File_Upload',
+    url = 'Deny_URL',
+    url_args = 'Deny_URL_Args',
+    cookie = 'Deny_Cookie',
+    post = 'Deny_URL_POST',
+}
+-- 直接 403 的检测器 (不输出 HTML), 保持原有行为
+local LEGACY_RAW_403 = { black_ip = true, dynamic_black_ip = true, cc = true }
+-- 日志 data 字段为 "_" 的检测器
+local LEGACY_DATA_DASH = { black_ip = true, dynamic_black_ip = true }
+
+local function legacy_block(name)
+    local fact = engine.detect(name)
+    if not fact then return false end
+    local tag = fact.tag or LEGACY_TAGS[name] or name
+    local data = fact.detail or (LEGACY_DATA_DASH[name] and "_" or "-")
+    log_record(tag, var.request_uri, data, fact.rule or "-")
+    if is_waf_enabled() ~= "on" then return false end
+    if LEGACY_RAW_403[name] then
+        ngx.exit(403)
+    else
+        waf_output()
+    end
+    return true
+end
+
+--=========================================================================
 -- OPTIMIZATION 1: waf_main with request-type short-circuit
 -- GET requests skip file_upload_check and post_attack_check entirely
 -- POST requests run all checks
--- This saves ~2 function calls + body reading for GET requests
 --=========================================================================
 local function waf_main()
     if var.waf_enable == "off" then
@@ -1114,14 +1100,22 @@ local function waf_main()
     if is_waf_enabled() == "off" then
         return
     end
-    -- IP checks (always run)
+    -- IP 白名单优先级最高
     if white_ip_check() then
         return
     end
-    if dynamic_black_ip_check() then
+
+    -- L2 + L3: 组合规则优先评估, 命中动作可终止请求。
+    -- 组合规则引用的检测器结果会被缓存, 下面的传统流程不会重复扫描。
+    if engine.run() then
         return
     end
-    if black_ip_check() then
+
+    -- 传统顺序策略 (检测器结果复用 engine 缓存)
+    if legacy_block('dynamic_black_ip') then
+        return
+    end
+    if legacy_block('black_ip') then
         return
     end
     -- whiteurl.rule: per-URL skip checks
@@ -1135,22 +1129,22 @@ local function waf_main()
 
     -- Request-type checks (url_skips can skip individual checks)
     if not (url_skips and url_skips.user_agent) then
-        if user_agent_attack_check() then
+        if legacy_block('user_agent') then
             return
         end
     end
     if not (url_skips and url_skips.header) then
-        if header_attack_check() then
+        if legacy_block('header') then
             return
         end
     end
     if not (url_skips and url_skips.referer) then
-        if referer_check() then
+        if legacy_block('referer') then
             return
         end
     end
     if not (url_skips and url_skips.cc) then
-        if cc_attack_check() then
+        if legacy_block('cc') then
             return
         end
     end
@@ -1159,7 +1153,7 @@ local function waf_main()
     -- GET/HEAD/OPTIONS skip file_upload and post checks (controlled by bodyless config)
     if not is_bodyless then
         if not (url_skips and url_skips.file_upload) then
-            if file_upload_check() then
+            if legacy_block('file_upload') then
                 return
             end
         end
@@ -1168,12 +1162,12 @@ local function waf_main()
     -- White-listed URL: skip url_attack_check if configured.
     -- url_args_check, cookie_check, post_check still apply unless explicitly skipped.
     if not (url_skips and url_skips.url_attack) then
-        if url_attack_check() then
+        if legacy_block('url') then
             return
         end
     end
     if not (url_skips and url_skips.url_args) then
-        if url_args_attack_check() then
+        if legacy_block('url_args') then
             return
         end
     end
@@ -1181,14 +1175,14 @@ local function waf_main()
     -- Cookie check: moved after URL/Args so short-circuit saves 1 regex on attack
     -- GET Cookie attacks exist (XSS injection via cookie), so we still check all methods
     if not (url_skips and url_skips.cookie) then
-        if cookie_attack_check() then
+        if legacy_block('cookie') then
             return
         end
     end
 
     if not is_bodyless then
         if not (url_skips and url_skips.post) then
-            if post_attack_check() then
+            if legacy_block('post') then
                 return
             end
         end

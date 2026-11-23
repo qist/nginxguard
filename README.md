@@ -64,10 +64,12 @@ waf/
 ├── init.lua                # init_by_lua_file 预加载模块
 ├── access.lua              # access_by_lua_file 每请求 NginxGuard 检测入口
 ├── lib.lua                 # NginxGuard 核心库（IP获取、规则加载、域名配置、日志、输出）
+├── engine.lua              # 三层规则引擎（L1 检测器 / L2 组合表达式 / L3 动作）
 ├── nginx-config/
 │   └── nginx.conf          # nginx 配置示例
 └── rule-config/
     ├── domain.json         # 域名级规则配置（仅放需要覆盖全局的域名）
+    ├── combo.jsonl         # 组合规则（JSONL，一行一条；默认含 CVE 虚拟补丁）
     ├── args.rule           # 全局 URL 参数规则
     ├── blackip.rule        # 全局黑名单 IP（支持 IPv4/IPv6 CIDR/通配符/精确IP）
     ├── cdnip.rule          # CDN/可信代理 IP 列表（控制 XFF 信任，支持 CIDR）
@@ -179,6 +181,7 @@ waf/
 | `multipart_streaming_check` | 是否启用 multipart 临时文件 body 的流式内容扫描（`post.rule`）。默认 `off`；关闭时仍保留文件名扩展名检查 | `config_multipart_streaming_check` |
 | `upload_filename_scan_limit` | multipart 文件名提取扫描上限（字节）。`0`=读取整个 multipart 临时文件内容来提取 `filename`；正整数=只读取前 N 字节 | `config_upload_filename_scan_limit` |
 | `post_body_scan_limit` | 大文本 body 落盘后的检查上限（字节）。超过该值直接拦截，避免部分扫描后误放行 | `config_post_body_scan_limit` |
+| `score_block_threshold` | 组合规则 `SCORE` 累计拦截阈值：`0`=只记分不拦截；`1`=开启拦截（任意 SCORE 命中即拦）；`>1`=累计达到该分值才拦。域名级可覆盖 | `config_score_block_threshold` |
 | `waf_output` | 拦截输出方式（`"html"` 或 `"redirect"`） | `config_waf_output` |
 | `waf_redirect_url` | 跳转 URL（`waf_output="redirect"` 时生效） | `config_waf_redirect_url` |
 
@@ -817,6 +820,34 @@ config_header_check = "on"
 
 ---
 
+## 三层组合规则（combo.jsonl）
+
+三层规则引擎由 `engine.lua` 实现，完整语法、检测器清单和实现边界见 [`docs/三层规则引擎.md`](docs/三层规则引擎.md)。
+
+| 层 | 作用 |
+|---|---|
+| L1 检测器 | `url` / `url_args` / `post` / `header` / `cookie` / `user_agent` / `referer` / `file_upload` / `cc` / `black_ip` / `dynamic_black_ip`，只返回命中事实，每请求最多执行一次并缓存 |
+| L2 组合表达式 | `AND` / `OR` / `NOT` / `AT_LEAST` + 内联请求条件（uri/args/method/protocol/header/cookie/body/ip/header_count 等） |
+| L3 动作 | `BLOCK`（默认）/ `LOG` / `ALERT` / `SCORE` / `CHALLENGE` |
+
+`rule-config/combo.jsonl` 一行一条 JSON，`#` 开头为注释，修改后 10 秒内热加载：
+
+```json
+{"id":"scanner-on-api","if":["AND","user_agent",{"cond":"uri","op":"prefix","value":"/api/"}],"action":"BLOCK"}
+{"id":"sqli-plus-rce","if":["AND","url_args","post"],"action":"SCORE","score":30}
+```
+
+- `SCORE` 累计到 `config_score_block_threshold` 时拦截：`0`（默认）= 只记分不拦截；`1` = **开启拦截**（任意一次 SCORE 命中，累计 ≥1 即拦，等价于开关）；`>1` = 累计达到该分值才拦。域名级可用 `score_block_threshold` 覆盖。建议不要长期用 `1`，按业务容忍度设置 20/30 等阈值，避免单条 SCORE 误报直接 403。
+- 内联条件**默认忽略大小写**：`re` 默认 `joi`，`contains`/`prefix` 默认忽略，`eq` 除 `method`/`protocol` 外默认忽略。需要精确匹配时，`re` 用 `"flags":"jo"` 或 `"case_sensitive":true`，其余用 `"icase":false`。
+- 阻断规则遇到无法判定的条件（检测器异常、请求头读取失败、请求体超过 2 MiB 等）采取 **fail-closed**，记录 `Combo_INDETERMINATE` 并拦截；因此 **大于 2 MiB 的 POST/上传会被组合规则拦截**，这是当前设计行为。引擎的 body 上限固定为 2 MiB，不随 `config_post_body_scan_limit` 变化。
+- 内联 `re` 正则在加载期预编译，正则或 `flags` 无效的整条规则会被记录错误并忽略，不会在运行期变成全站 403。
+- `NOT` 子树不允许包含 L1 检测器，避免“检查被关闭/跳过”被取反成命中。
+- 升级时**必须同时部署 `engine.lua` 和 `rule-config/combo.jsonl`**；缺少 `engine.lua` 会导致 `require 'engine'` 失败，WAF 无法正常工作。
+- 域名级支持：`domain.json` 可覆盖 `score_block_threshold`、各检测开关、body 阈值和 `rule_dir`（域名 `combo.jsonl` 放对应规则目录）。
+- 向后兼容：旧版 `access.lua`/`lib.lua` 不读取 `combo.jsonl`、也不使用 score 阈值；仅更新 `rule-config`（combo/domain/config）不会破坏旧代码。升级代码文件时必须同时带 `engine.lua`。
+
+---
+
 ## 日志
 
 ### 同步写入机制
@@ -980,6 +1011,47 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
 >
 > 本轮新增的 **Nginx 内存优化**：将 `lua_shared_dict limit`/`badGuys` 从 100m 缩减到 10m，`client_header_buffer_size` 从 1024k 缩到 1k，`large_client_header_buffers` 从 4×128k 缩到 4×8k，`client_body_buffer_size` 从 1024k 缩到 128k，`proxy_buffer_size`/`proxy_buffers` 从 64k 缩到 16k，`proxy_cache_path` 从 50m/7d/2g 缩到 10m/1d/1g，`open_file_cache` 从 100000 条缩到 10000 条。实测 WAF 关闭时内存 174MB，WAF 全开后 179-183MB，内存仅增加 5-9MB，且所有场景 P99 延迟均控制在 66ms 以内。`trust_proxy_headers=on` + `cdnip.rule` 相比 `off` 仍有额外开销，但明显优于“无 `cdnip.rule` 时无条件信任 XFF”的路径；生产环境依然建议保留 CDN IP 校验。CC 防护生效后 IP 自动封禁 600 秒，后续请求直接 403 快速返回。新增的 worker 级匹配缓存主要把收益打在重复参数和重复 body 的 POST 热路径上。
 
+#### 2026-11-23 三层规则引擎复测
+
+环境同上（`192.168.2.180`，4 核，50,000 请求 / 200 并发 / Keep-Alive，每场景 3 次取最佳，`test/benchmark.sh`）。本轮为当前 HEAD：三层规则引擎 + 2026-11 新增规则集（php2shell、Exchange/Jenkins/LeakIX 等），所有场景 `Failed requests = 0`。
+
+| 场景 | req/s | P99 | 相对同类基线 |
+|------|-------|-----|--------------|
+| GET 基线（WAF 全关） | 25,002 | 32ms | — |
+| GET + WAF（无 CC/POST） | 13,474 | 81ms | -46.1% |
+| GET + WAF + CC | 13,702 | 86ms | -45.2% |
+| GET + WAF 全开 | 13,022 | 72ms | -47.9% |
+| form POST 基线（WAF 全关） | 25,466 | 38ms | — |
+| form POST + WAF（CC 关闭） | 12,696 | 83ms | -50.1% |
+| JSON POST 基线（WAF 全关） | 25,636 | 61ms | — |
+| JSON POST + WAF（CC 关闭） | 12,845 | 94ms | -49.9% |
+
+> 与 2026-08-20 的数据相比整体吞吐下降，主要来自规则集扩充（新增多组 CVE/组件规则）与该轮压测环境波动，**不能直接归因于三层引擎**。单独隔离引擎自身开销（同样构建、3,000 请求 / 50 并发，仅切换 `combo.jsonl`）：
+
+| 组合规则 | req/s |
+|----------|-------|
+| 空规则（仅注释） | 8,968 |
+| 5 条启用规则 | 8,688 |
+
+> 引擎增量开销约 **3%**，与测量波动同量级；5 条规则的内联 URI/协议/请求头/请求体判断不构成主要瓶颈。大小写默认改为忽略后复测（空规则 8,484 / 5 条规则 8,701 rps）仍在噪声范围内。
+
+功能回归（同一环境）：
+
+| 测试集 | 结果 |
+|--------|------|
+| `test/waf_full_test.sh` 规则全量 | 297 / 297 通过 |
+| `test/waf_regression_test.sh`（组合规则、大小写、热加载、LOG/SCORE、坏正则） | 68 / 68 通过 |
+| `test/waf_scenario_test.sh` 域名/白名单/Location 场景 | 58 / 58 通过 |
+
+HTTP/2 规则 `CVE-2026-119618 mod_http2 header flood` 在 `172.21.107.126`（nginx 1.31.9，真实 HTTPS/HTTP2 站点）实测通过：
+
+| 请求 | 结果 |
+|------|------|
+| HTTP/2 + 90 个请求头 + Content-Type，无 Content-Length/Transfer-Encoding | 403 `Combo_BLOCK` |
+| HTTP/1.1 + 同样 90 个头 | 放行 |
+| HTTP/2 + 90 个头 + Content-Type + `Content-Length: 0` | 放行 |
+| HTTP/2 + 90 个头但无 Content-Type / 仅 10 个头 | 放行 |
+
 ---
 
 ## 安全检测流程
@@ -993,31 +1065,36 @@ NginxGuard 内置日志轮转：当日志文件超过 **100MB** 时自动重命�
        ↓
 3. white_ip_check     → 白名单 IP 放行
        ↓
-4. dynamic_black_ip   → 动态黑名单（CC 自动拉黑期内）
+4. 组合规则 combo.jsonl → L2 表达式按需调用 L1 检测器，命中动作执行
+       │                  BLOCK/CHALLENGE 或 SCORE 达阈值 → 终止
        ↓
-5. black_ip_check     → 静态黑名单 IP
+5. dynamic_black_ip   → 动态黑名单（CC 自动拉黑期内）
        ↓
-6. white_url_check    → 白名单 URL（返回跳过的检测项配置）
+6. black_ip_check     → 静态黑名单 IP
        ↓
-7. user_agent_check   → User-Agent 攻击（白名单 UA 跳过此项）
+7. white_url_check    → 白名单 URL（返回跳过的检测项配置）
        ↓
-8. header_check       → 请求头攻击（header.rule）
+8. user_agent_check   → User-Agent 攻击（白名单 UA 跳过此项）
        ↓
-9. referer_check      → Referer 攻击
+9. header_check       → 请求头攻击（header.rule）
        ↓
-10. cc_attack_check   → CC 限速
+10. referer_check     → Referer 攻击
        ↓
-11. file_upload_check → 文件上传扩展名（`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
+11. cc_attack_check   → CC 限速
        ↓
-12. url_attack_check  → URL 路径攻击
+12. file_upload_check → 文件上传扩展名（`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
        ↓
-13. url_args_check    → URL 参数攻击
+13. url_attack_check  → URL 路径攻击
        ↓
-14. cookie_check      → Cookie 攻击
+14. url_args_check    → URL 参数攻击
        ↓
-15. post_check        → POST 攻击（表单 + JSON body，`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
+15. cookie_check      → Cookie 攻击
+       ↓
+16. post_check        → POST 攻击（表单 + JSON body，`bodyless=on` 时跳过 GET/HEAD/OPTIONS）
        ↓
      放行
 ```
+
+> 组合规则先于传统检测执行；它调用过的检测器结果会缓存在 `ngx.ctx._waf_facts`，后续传统流程不会重复扫描。组合规则不受 `whiteurl.rule` 的跳过项影响。
 
 > 整个流程包裹在 `pcall` 中，任何意外错误均被捕获并记录到 `ngx.log(ngx.ERR)`，不会导致 500 错误返回给客户端。

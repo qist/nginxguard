@@ -1,0 +1,60 @@
+# NginxGuard 组合规则 (JSONL: 一行一条 JSON, # 开头为注释)
+# 三层模型: L1 基础检测器 -> L2 组合表达式 -> L3 动作
+#
+# L1 检测器名 (由 access.lua 注册, 每次请求最多执行一次, 组合规则只是复用结果):
+#   url  url_args  post  header  cookie  user_agent  referer  file_upload
+#   cc   black_ip  dynamic_black_ip
+#
+# L2 表达式:
+#   "url"                                 叶子 = 检测器命中
+#   ["AND", a, b, ...]                    全部命中
+#   ["OR", a, b, ...]                     任意命中
+#   ["NOT", a]                            取反
+#   ["AT_LEAST", n, a, b, ...]            至少 n 个命中
+#   {"cond":"uri","op":"re","value":"..."} 内联条件, 只读请求字段不做规则扫描
+#      cond: uri args method protocol header cookie body ip header_count
+#            content_type content_length transfer_encoding
+#      op:   re(默认) eq contains prefix exists; header_count 用 gte/lte/eq
+#      大小写: re/contains/prefix/eq(非 method/protocol) 默认忽略;
+#              re 用 flags 或 case_sensitive:true 关闭, 其余用 icase:false 关闭
+#
+# L3 动作 (action 字段, 默认 BLOCK):
+#   BLOCK     记录日志并拦截
+#   LOG       只记录日志, 继续后续检测
+#   ALERT     记录告警日志, 继续后续检测
+#   SCORE     累计分值, 达到 config_score_block_threshold 后拦截
+#             阈值 0=只记分不拦; 1=任意 SCORE 命中即拦(等价开关); >1=累计达到才拦
+#   CHALLENGE 复用统一输出配置 (config_waf_output / config_waf_redirect_url),
+#             与 BLOCK 输出一致, 仅日志标签不同; 接入独立挑战页时再扩展
+#
+# 规则按文件顺序执行; 建议先写便宜条件 (uri/method/protocol), 再写需要读 body 的表达式。
+# 修改后 10 秒内热加载, 无需改 Lua / reload。
+
+# ===== 2026-11 CVE 虚拟补丁 =====
+# CVE-2026-119977: WordPress Core 升级窗口期 staging 路径 RCE
+{"id":"CVE-2026-119977 WordPress setup-config","if":["AND",{"cond":"uri","op":"re","value":"(?i)/wp-admin/setup-config\\.php(?:/|$)"}],"action":"BLOCK"}
+{"id":"CVE-2026-119977 WordPress upgrade staging","if":["AND",{"cond":"uri","op":"re","value":"(?i)/wp-content/upgrade/.*\\.php(?:/|$)"}],"action":"BLOCK"}
+# CVE-2026-119618: Apache mod_http2 assign_headers() 竞态
+# 触发条件: HTTP/2 + 有 Content-Type 无 Content-Length/Transfer-Encoding + 请求头表填满
+{"id":"CVE-2026-119618 mod_http2 header flood","if":["AND",{"cond":"protocol","op":"eq","value":"HTTP/2.0"},{"cond":"content_type","op":"exists"},["NOT",{"cond":"content_length","op":"exists"}],["NOT",{"cond":"transfer_encoding","op":"exists"}],{"cond":"header_count","op":"gte","value":80}],"action":"BLOCK"}
+# CVE-2026-90436: Apache Axis 1.x 反序列化入站 SOAP Fault
+# 正常客户端不会向服务端发送 <Fault>; 同时出现 exceptionName 即为利用特征
+{"id":"CVE-2026-90436 Axis SOAP Fault","if":["AND",{"cond":"method","op":"eq","value":"POST"},{"cond":"body","op":"re","value":"(?is)<(?:[a-z0-9_.-]+:)?fault[\\s/>]"},{"cond":"body","op":"re","value":"(?is)<(?:[a-z0-9_.-]+:)?exceptionname[\\s/>]"}],"action":"BLOCK"}
+# CVE-2026-126714: phpAfterShell 会话文件部分覆写, 远程塑形入口为 session.upload_progress
+{"id":"CVE-2026-126714 phpAfterShell upload progress","if":["AND",{"cond":"method","op":"eq","value":"POST"},{"cond":"content_type","op":"contains","value":"multipart/form-data","icase":true},{"cond":"body","op":"re","value":"(?i)name\\s*=\\s*\"?PHP_SESSION_UPLOAD_PROGRESS\\b"}],"action":"BLOCK"}
+
+# ===== 组合规则示例 (默认注释, 取消注释即启用) =====
+# 示例 1: 扫描器 UA 命中且访问 /api/ 前缀 -> 拦截
+# {"id":"scanner-ua-on-api","if":["AND","user_agent",{"cond":"uri","op":"prefix","value":"/api/"}],"action":"BLOCK"}
+
+# 示例 2: 参数命中 SQL 注入 且 请求体命中命令执行 -> 记 30 分
+# {"id":"sqli-plus-rce","if":["AND","url_args","post"],"action":"SCORE","score":30}
+
+# 示例 3: 访问 /admin 且来源不是内网 -> 挑战
+# {"id":"admin-outside","if":["AND",{"cond":"uri","op":"re","value":"^/admin(/|$)"},["NOT",{"cond":"ip","op":"re","value":"^10\\."}]],"action":"CHALLENGE"}
+
+# 示例 4: 至少命中 2 类检测器才拦截, 降低单条规则误报
+# {"id":"multi-signal","if":["AT_LEAST",2,"url","url_args","post","header"],"action":"BLOCK"}
+
+# 示例 5: 只观测不拦截 (灰度阶段)
+# {"id":"observe-post","if":["AND","post",{"cond":"method","op":"eq","value":"POST"}],"action":"LOG"}

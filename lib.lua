@@ -575,6 +575,9 @@ local function read_rule_file(filepath)
     -- Skip for cdnip.rule: CIDR entries are pre-compiled by load_cdnip_cache,
     -- building a combined regex from CIDR strings (e.g. 1.180.27.0/24) is useless and wasteful
     local is_cdnip = filepath:match("cdnip%.rule$")
+    -- JSONL 是结构化规则 (combo.jsonl): 只按行交给调用方 cjson.decode,
+    -- 不参与正则合并/glob 预编译
+    local is_jsonl = filepath:match("%.jsonl$")
     local parts = {}
     -- Dual-engine: separate plain-string rules (fast: string.find) from regex rules
     -- Plain rules have NO regex metacharacters: ( ) [ ] { } . * + ? ^ $ | \
@@ -588,7 +591,7 @@ local function read_rule_file(filepath)
     local fast_hash = {}
     local regex_rules = {}
     local has_fast = false
-    if not is_cdnip then
+    if not is_cdnip and not is_jsonl then
         for _, r in ipairs(t) do
             if r ~= "" then
                 -- Check if rule contains regex metacharacters
@@ -615,7 +618,7 @@ local function read_rule_file(filepath)
     -- Pre-compile glob patterns (for IP rules like 192.168.*)
     -- Skip for cdnip.rule: handled by load_cdnip_cache
     local glob_compiled = {}
-    if not is_cdnip then
+    if not is_cdnip and not is_jsonl then
         for _, r in ipairs(t) do
             if r ~= "" and string.find(r, "%*") then
                 table.insert(glob_compiled, glob_to_regex(r))

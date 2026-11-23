@@ -1,7 +1,7 @@
 #!/bin/bash
 # NginxGuard 全场景压测
 # 默认在本机执行；如设置 BENCH_REMOTE_HOST=192.168.2.180，
-# 则脚本会自动上传最新 access.lua/lib.lua/benchmark.sh 到远端，
+# 则脚本会自动上传最新 access.lua/lib.lua/engine.lua/benchmark.sh 到远端，
 # 替换远端 WAF 文件、校验并重启 nginx 后，再在远端本机执行压测。
 # 50000请求 200并发, 每场景3次取最佳值, ab + ps/top 监控
 # 为避免口径混乱，GET / form POST / JSON POST 分组分别对比。
@@ -11,6 +11,7 @@ REMOTE_HOST="${BENCH_REMOTE_HOST:-}"
 REMOTE_TMP_SCRIPT="/tmp/benchmark_remote.$$.$RANDOM.sh"
 REMOTE_TMP_ACCESS="/tmp/access_bench.$$.$RANDOM.lua"
 REMOTE_TMP_LIB="/tmp/lib_bench.$$.$RANDOM.lua"
+REMOTE_TMP_ENGINE="/tmp/engine_bench.$$.$RANDOM.lua"
 REMOTE_WAF_DIR="/opt/nginx/lua/waf"
 REMOTE_NGINX_HOME="/opt/nginx"
 
@@ -20,12 +21,15 @@ if [ -n "$REMOTE_HOST" ] && [ "${BENCH_REMOTE_MODE:-0}" != "1" ]; then
     LOCAL_SCRIPT="$SCRIPT_DIR/benchmark.sh"
     LOCAL_ACCESS="$REPO_ROOT/access.lua"
     LOCAL_LIB="$REPO_ROOT/lib.lua"
+    LOCAL_ENGINE="$REPO_ROOT/engine.lua"
     scp -o StrictHostKeyChecking=no "$LOCAL_SCRIPT" "${REMOTE_HOST}:${REMOTE_TMP_SCRIPT}" || exit 1
     scp -o StrictHostKeyChecking=no "$LOCAL_ACCESS" "${REMOTE_HOST}:${REMOTE_TMP_ACCESS}" || exit 1
     scp -o StrictHostKeyChecking=no "$LOCAL_LIB" "${REMOTE_HOST}:${REMOTE_TMP_LIB}" || exit 1
+    scp -o StrictHostKeyChecking=no "$LOCAL_ENGINE" "${REMOTE_HOST}:${REMOTE_TMP_ENGINE}" || exit 1
     ssh -o StrictHostKeyChecking=no "$REMOTE_HOST" "\
         install -m 644 '$REMOTE_TMP_ACCESS' '$REMOTE_WAF_DIR/access.lua' && \
         install -m 644 '$REMOTE_TMP_LIB' '$REMOTE_WAF_DIR/lib.lua' && \
+        install -m 644 '$REMOTE_TMP_ENGINE' '$REMOTE_WAF_DIR/engine.lua' && \
         cd '$REMOTE_NGINX_HOME' && ./nginx -p '$REMOTE_NGINX_HOME/' -c conf/nginx.conf -t && \
         ./nginx -p '$REMOTE_NGINX_HOME/' -c conf/nginx.conf -s stop 2>/dev/null || kill -TERM \$(cat '$REMOTE_NGINX_HOME/logs/nginx.pid' 2>/dev/null) 2>/dev/null || true; \
         sleep 1; \
@@ -33,7 +37,7 @@ if [ -n "$REMOTE_HOST" ] && [ "${BENCH_REMOTE_MODE:-0}" != "1" ]; then
         sleep 1; \
         chmod +x '$REMOTE_TMP_SCRIPT' && BENCH_REMOTE_MODE=1 '$REMOTE_TMP_SCRIPT'; \
         status=\$?; \
-        rm -f '$REMOTE_TMP_SCRIPT' '$REMOTE_TMP_ACCESS' '$REMOTE_TMP_LIB'; \
+        rm -f '$REMOTE_TMP_SCRIPT' '$REMOTE_TMP_ACCESS' '$REMOTE_TMP_LIB' '$REMOTE_TMP_ENGINE'; \
         exit \$status"
     exit $?
 fi
@@ -199,12 +203,18 @@ run_bench "B-get-noCC-noPOST"
 echo "######## C: GET + WAF + CC ########" | tee -a $RESULT_FILE
 cp $WAF_CONFIG_BAK $WAF_CONFIG
 set_config "post_check" "off"
+# 压测请求全部来自 127.0.0.1, 保持默认 150/60 会在 150 次后自封并让后续全部 403;
+# 抬高阈值只为让 CC 计数路径全程参与, 不影响 CC 逻辑本身的压测覆盖
+set_config "cc_rate" "999999/60"
+set_config "cc_block_ttl" "0"
 restart_nginx
 run_bench "C-get-withCC"
 
 # 场景 D: GET + WAF 全开（生产）
 echo "######## D: GET + WAF 全开（生产）########" | tee -a $RESULT_FILE
 cp $WAF_CONFIG_BAK $WAF_CONFIG
+set_config "cc_rate" "999999/60"
+set_config "cc_block_ttl" "0"
 restart_nginx
 run_bench "D-get-production"
 

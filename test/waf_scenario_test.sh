@@ -56,7 +56,7 @@ echo -e "${YELLOW}  --- 白名单UA + URL参数攻击 (应拦截 403) ---${NC}" 
 test_rule "Googlebot + SQL注入" 403 -A "Googlebot/2.1" "$TARGET/?id=1+union+select+1"
 test_rule "Googlebot + XSS" 403 -A "Googlebot/2.1" "$TARGET/?q=<script>alert(1)</script>"
 test_rule "Baiduspider + 路径遍历" 403 -A "Baiduspider" "$TARGET/?file=../../../etc/passwd"
-test_rule "Googlebot + 命令注入" 403 -A "Googlebot/2.1" "$TARGET/?q=system(ls)"
+test_rule "Googlebot + 命令注入" 403 -A "Googlebot/2.1" "$TARGET/?q=system(%22ls%22)"
 
 echo -e "${YELLOW}  --- 白名单UA + Cookie攻击 (应拦截 403) ---${NC}" | tee -a $RESULTS
 test_rule "Googlebot + Cookie SQL" 403 -A "Googlebot/2.1" -b "id=1 union select 1" "$TARGET/"
@@ -94,8 +94,12 @@ test_rule "www.example.com POST SQL (post仍on)" 403 -H "Host: www.example.com" 
 # 域名独立 whiteurl (NginxGuard放行, nginx找不到文件返回404)
 test_rule "www.example.com 白名单URL /123/ (404=放行)" 404 -H "Host: www.example.com" -A "Mozilla/5.0" "$TARGET/123/"
 test_rule "www.example.com 白名单URL /123/ + Go-http-client (404=放行)" 404 -H "Host: www.example.com" -A "Go-http-client/2.0" "$TARGET/123/"
-# 域名独立 whiteip
-test_rule "www.example.com 白名单IP 8.8.8.8" 200 -H "Host: www.example.com" -A "Mozilla/5.0" -H "X-Forwarded-For: 8.8.8.8" "$TARGET/?id=union+select"
+# 全局 whiteip（测试夹具: 临时写入 8.8.8.8, 结束后恢复）
+WHITEIP_BAK="/tmp/whiteip.scenario.$$"
+$SSH180 "cp /opt/nginx/lua/waf/rule-config/whiteip.rule $WHITEIP_BAK; grep -qx '8.8.8.8' /opt/nginx/lua/waf/rule-config/whiteip.rule || echo '8.8.8.8' >> /opt/nginx/lua/waf/rule-config/whiteip.rule"
+sleep $RULE_CACHE_WAIT
+test_rule "全局白名单IP 8.8.8.8 (unknown.com)" 200 -H "Host: unknown.com" -A "Mozilla/5.0" -H "X-Forwarded-For: 8.8.8.8" "$TARGET/?id=union+select"
+$SSH180 "cp $WHITEIP_BAK /opt/nginx/lua/waf/rule-config/whiteip.rule; rm -f $WHITEIP_BAK"
 
 echo -e "${YELLOW}  --- api.example.com (waf_enable=off, 全部放行) ---${NC}" | tee -a $RESULTS
 test_rule "api.example.com SQL注入 (waf off)" 200 -H "Host: api.example.com" -A "Mozilla/5.0" "$TARGET/?id=1+union+select+1"
@@ -158,7 +162,7 @@ test_rule "/nowaf/ 正常GET" 200 -A "Mozilla/5.0" "$TARGET/nowaf/"
 test_rule "/nowaf/ SQL注入" 200 -A "Mozilla/5.0" "$TARGET/nowaf/?id=1+union+select+1"
 test_rule "/nowaf/ XSS" 200 -A "Mozilla/5.0" "$TARGET/nowaf/?q=<script>alert(1)</script>"
 test_rule "/nowaf/ 路径遍历" 200 -A "Mozilla/5.0" "$TARGET/nowaf/?file=../../../etc/passwd"
-test_rule "/nowaf/ 命令注入" 200 -A "Mozilla/5.0" "$TARGET/nowaf/?q=system(ls)"
+test_rule "/nowaf/ 命令注入" 200 -A "Mozilla/5.0" "$TARGET/nowaf/?q=system(%22ls%22)"
 test_rule "/nowaf/ sqlmap UA" 200 -A "sqlmap/1.0" "$TARGET/nowaf/"
 test_rule "/nowaf/ Cookie攻击" 200 -A "Mozilla/5.0" -b "id=1+union+select+1" "$TARGET/nowaf/"
 test_rule "/nowaf/ /etc/passwd路径 (404=放行)" 404 -A "Mozilla/5.0" "$TARGET/nowaf/etc/passwd"

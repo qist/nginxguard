@@ -77,6 +77,12 @@ config_upload_filename_scan_limit = 0
 --applies to BOTH non-multipart bodies and multipart streaming scans
 --(multipart bodies exceeding this limit are denied, never partially scanned)
 config_post_body_scan_limit = 2097152
+--组合规则 SCORE 动作的累计拦截阈值: 同一请求内分值累计 >= 该值时拦截
+--0 (默认) = 只记分不拦截, 避免误配导致全站拦截
+-->0 = 开启拦截; =1 表示任意一次 SCORE 命中(累计>=1)即拦截, 等价于拦截开关
+-->1 时建议配合更精确的条件, 否则单条 SCORE 规则误报就会直接 403
+--域名级可通过 domain.json 的 score_block_threshold 覆盖
+config_score_block_threshold = 0
 --config waf output redirect/html
 config_waf_output = "html"
 --if config_waf_output ,setting url
