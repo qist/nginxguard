@@ -153,6 +153,8 @@ waf/
 }
 ```
 
+> **与 CaddyGuard 共用**：`domain.json` 的站点级键名以本项目为准（即 `config.lua` 的 `config_*` 去掉前缀），同一份文件可直接给 NginxGuard 和 CaddyGuard 使用。数值型键（`cc_block_ttl`、`upload_filename_scan_limit`、`post_body_scan_limit`、`score_block_threshold`）经 `tonumber()` 解析，JSON 数字和数字字符串（如 `"600"`）都接受；`cc_block_ttl: 0` 表示该站点只限速、不自动拉黑；`log_dir`、`match_cache`、`output_html` 只按全局配置生效。
+
 ### 配置项说明
 
 | 字段 | 说明 | 对应 config.lua 变量 |
